@@ -11,7 +11,7 @@ import ctypes
 from ctypes import wintypes
 
 
-update_cookies = True
+update_cookies = False
 cwd = os.getcwd()
 
 
