@@ -194,9 +194,10 @@ def analyse_illusts_m(th_count) -> list:
 
     return illdata
 
-URLs = analyse_bookmarks()
+#URLs = analyse_bookmarks()
+URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=0&limit=5&rest=show&lang=zh']
 illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
-
+a=1
 
 
 
