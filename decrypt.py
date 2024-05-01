@@ -10,8 +10,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import ctypes
 from ctypes import wintypes
 
+import config
 
-update_cookies = False
+update_cookies = config.UPDATE_COOKIES
 cwd = os.getcwd()
 
 
