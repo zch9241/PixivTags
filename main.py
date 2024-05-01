@@ -11,6 +11,8 @@ from decrypt import *
 
 UID :str = '71963925'
 ANALYSE_ILLUST_THREADS: int = 10
+CWD = os.getcwd()
+SQLPATH = CWD + '\src\illdata.db'
 
 logger = logging.getLogger('logger')
 
@@ -197,6 +199,85 @@ def analyse_illusts_m(th_count) -> list:
 #URLs = analyse_bookmarks()
 URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=0&limit=5&rest=show&lang=zh']
 illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
+def writeraw_to_db_i(illdata):
+    # 一个线程对应一个connection
+    con = sqlite3.connect(SQLPATH)
+    cursor = con.cursor()
+    # 新数据
+    pid = int(illdata['id'])
+    jptag = str(illdata['tags'])
+    transtag = '0'
+    is_translated = 0
+    is_private_b = illdata['bookmarkData']['private']
+    if is_private_b == False:
+        is_private = 0
+    elif is_private_b == True:
+        is_private = 1
+    
+    newdata = (pid, jptag, transtag, is_translated, is_private)
+    data_to_modify = [0,0,0,0,0]
+    var = {0:['pid',pid], 1:['jptag',jptag], 2:['transtag',transtag], 
+           3:['is_translated',is_translated], 4:['is_private',is_private]}
+    
+    # 先查询已有信息，再判断是否需要修改
+    cursor.execute(f'''
+                   SELECT * FROM illusts WHERE pid = {pid}
+                   ''')
+    olddata: list = cursor.fetchall()
+    # 比较信息, 将不同之处添加至修改位置列表
+    if olddata == []:     # 无信息
+        logger.debug('添加新信息')
+        cursor.execute(f'''
+                       INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})
+                       ''')
+        con.commit()
+    elif olddata[0] == newdata:
+        logger.debug('数据重复，无需添加')
+        pass
+    else:
+        for i in range(len(olddata[0])):
+            if olddata[0][i] != newdata[i]:
+                data_to_modify[i] = 1
+        for i in range(len(data_to_modify)):
+            if data_to_modify[i] == 1 and i == 1:    #只修改jptag和is_private值
+                # logger.debug('更新jptag数据, 修改is_translated值')
+                # 下面这里要加个""才行
+                cursor.execute(f'''
+                                UPDATE illusts SET {var[1][0]} = "{var[1][1]}" where pid = {pid}
+                                ''')
+                con.commit()
+                cursor.execute(f'''
+                                UPDATE illusts SET {var[3][0]} = {var[3][1]} where pid = {pid}
+                                ''')
+                con.commit()
+                
+            elif data_to_modify[i] == 1 and i == 4:
+                #logger.debug('更新is_privated数据')
+                cursor.execute(f'''
+                                UPDATE illusts SET {var[4][0]} = {var[4][1]} where pid = {pid}
+                                ''')
+                con.commit()
+
+    con.close()
+
+
+def writeraw_to_db_m(th_count):
+    '''
+    将所有tag提交至数据库
+    '''
+    all_th = []
+    logger.info(f'创建线程池，线程数量: {th_count}')
+    with ThreadPoolExecutor(max_workers = th_count) as pool:
+        while len(illdata) > 0:
+            i = illdata.pop(0)
+            all_th.append(pool.submit(writeraw_to_db_i, i))
+        wait(all_th, return_when=ALL_COMPLETED)
+        for th in all_th:
+            if th.exception():
+                logger.warning(f'运行时出现错误: {th.exception()}')
+        logger.info('所有线程运行完成')
+
+writeraw_to_db_m(10)
 a=1
 
 
