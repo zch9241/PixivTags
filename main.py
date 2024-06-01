@@ -4,9 +4,11 @@ from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 import logging
-from concurrent.futures import ThreadPoolExecutor,wait,ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from time import sleep
 from urllib import parse
+import sys
+import traceback
 
 from decrypt import *
 
@@ -15,7 +17,8 @@ WRITERAW_TO_DB_THREADS: int = 10
 WRITE_TAGS_TO_DB_THREADS: int = 10
 FETCH_TRANSLATED_TAG_THREADS: int = 10
 WRITE_TRANSTAGS_TO_DB_THREADS: int = 10
-UID :str = '71963925'
+TRANSTAG_RETURN_THREADS: int = 10
+UID: str = '71963925'
 
 CWD = os.getcwd()
 SQLPATH = CWD + '\src\illdata.db'
@@ -48,6 +51,44 @@ for data in cookies:
 logger.info(f'解密完成，数量 {len(cookie)}')
 # 
 
+
+def connection_handler(vars: list):
+    """对pixiv远程服务器返回非预期值的处理
+
+    Args:
+        vars (list): 可能出现解析错误的变量列表
+    """
+    def wrapper(func):
+        def inner_wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if e.__class__ == KeyError:
+                    # 获取当前的traceback对象
+                    tb = sys.exc_info()[2]
+                    # 获取堆栈跟踪条目
+                    tblist = traceback.extract_tb(tb)
+                    # 获取引发错误的起始原因
+                    initial_reason = tblist[-1].line
+                    logger.warning(f'解析出现错误，服务器可能未返回正确信息 {initial_reason}')
+                    
+                    # debug使用，以获取出现错误的具体原因
+                    # tb_list = traceback.format_tb(tb)
+                    # print("".join(tb_list))
+                    
+                    for var in vars:
+                        if str(var) in initial_reason:
+                            logger.warning(f'相关变量: {var}')
+
+                else:
+                    logger.error(f'未知错误 {sys.exc_info}')
+                    tb = sys.exc_info()[2]
+                    tb_list = traceback.format_tb(tb)
+                    print("".join(tb_list))
+        return inner_wrapper
+    return wrapper
+
+@connection_handler(['total_show', 'total_hide'])
 def analyse_bookmarks(rest_flag = 2, limit = 100) -> list:
     '''
     # 解析收藏接口
@@ -145,6 +186,7 @@ def analyse_bookmarks(rest_flag = 2, limit = 100) -> list:
     #print(urls)
     return urls
 
+@connection_handler(['idata'])
 def analyse_illusts_i(url) -> list:
     '''
     解析所有插画的信息
@@ -175,7 +217,8 @@ def analyse_illusts_i(url) -> list:
             By.CSS_SELECTOR, 'body > pre'
             ).text
         )
-    for ildata in resp['body']['works']:
+    idata = resp['body']['works']
+    for ildata in idata:
         illustdata.append(ildata)
 
     sleep(0.1)
@@ -344,6 +387,7 @@ def write_tags_to_db_m(th_count):
                 logger.error(f'运行时出现错误: {th.exception()}')
         logger.info(f"所有线程运行完成, 添加: {result.count('0')}  跳过: {result.count('1')}")
 
+@connection_handler(['trans'])
 def fetch_translated_tag_i(j, priority = None) -> dict:
     '''
     发送请求获取翻译后的tag
@@ -450,7 +494,52 @@ def write_transtags_to_db_m(th_count):
                 logger.error(f'运行时出现错误: {th.exception()}')
     logger.info('翻译后的tag已提交')
 
+def transtag_return_i(r0):
+    con = sqlite3.connect(SQLPATH)
+    cur = con.cursor()
 
+    pid, jptag0, transtag0, is_translated0, is_private0 = r0
+    jptags = eval(jptag0)
+    l = [''] * len(jptags)
+    for i in range(len(jptags)):
+        cur.execute('''
+                    SELECT * FROM tags
+                    ''')
+        resp = cur.fetchall()
+        for r in resp:
+            jptag, transtag = r
+            if jptag == jptags[i]:
+                l[i] = transtag
+    cur.execute(f'''
+                UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
+                ''')
+    cur.execute(f'''
+                UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
+                ''')
+    con.commit()
+    # logger.debug(l)
+
+def transtag_return_m(th_count):
+    '''
+    上传翻译后的tags至illust表
+    '''
+    all_th = []
+    logger.info(f'创建线程池，线程数量: {th_count}')
+    with ThreadPoolExecutor(max_workers = th_count) as pool:
+        con = sqlite3.connect(SQLPATH)
+        cur = con.cursor()
+        cur.execute('''
+                    SELECT * FROM illusts
+                    ''')
+        resp0 = cur.fetchall()
+        for r0 in resp0:
+            all_th.append(pool.submit(transtag_return_i, r0))
+        
+        wait(all_th, return_when = ALL_COMPLETED)
+        for th in all_th:
+            if th.exception():
+                logger.error(f'运行时出现错误: {th.exception()}')
+    logger.info('翻译后的tag已提交')
 
 URLs = analyse_bookmarks()
 #debug:
@@ -476,6 +565,7 @@ trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
 
 write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS)
 
+transtag_return_m(TRANSTAG_RETURN_THREADS)
 
 a=1
 
