@@ -73,8 +73,8 @@ def connection_handler(vars: list):
                     logger.warning(f'解析出现错误，服务器可能未返回正确信息 {initial_reason}')
                     
                     # debug使用，以获取出现错误的具体原因
-                    # tb_list = traceback.format_tb(tb)
-                    # print("".join(tb_list))
+                    tb_list = traceback.format_tb(tb)
+                    print("".join(tb_list))
                     
                     for var in vars:
                         if str(var) in initial_reason:
@@ -101,7 +101,6 @@ def analyse_bookmarks(rest_flag = 2, limit = 100) -> list:
     rest = rest_dict[rest_flag]
     
     offset = 0
-    limit = 100
 
     # 解析作品数量
     def analyse_total():
@@ -282,7 +281,7 @@ def writeraw_to_db_i(illdata) -> list:
                        ''')
         con.commit()
         status = ['0']
-    elif olddata[0] == newdata:
+    elif olddata[0][1] == newdata[1]:
         logger.debug('数据重复，无需添加')
         status = ['1']
     else:
@@ -387,7 +386,7 @@ def write_tags_to_db_m(th_count):
                 logger.error(f'运行时出现错误: {th.exception()}')
         logger.info(f"所有线程运行完成, 添加: {result.count('0')}  跳过: {result.count('1')}")
 
-@connection_handler(['trans'])
+@connection_handler(['connection_handler_trigger'])
 def fetch_translated_tag_i(j, priority = None) -> dict:
     '''
     发送请求获取翻译后的tag
@@ -416,13 +415,18 @@ def fetch_translated_tag_i(j, priority = None) -> dict:
             ).text
         )
     try:
-        trans: dict = resp['body']['tagTranslation'][j]   #包含所有翻译语言的dict
-        lans = trans.keys()
-        for l in priority:
-            if l in lans and trans[l] != '':
-                transtag = trans[l]
-                break
-        result = {j: transtag}
+        connection_handler_trigger = resp['body']['tagTranslation']
+        if connection_handler_trigger == []:
+            #print(connection_handler_trigger)
+            raise UnboundLocalError
+        else:
+            trans: dict = connection_handler_trigger[j]   #包含所有翻译语言的dict
+            lans = trans.keys()
+            for l in priority:
+                if l in lans and trans[l] != '':
+                    transtag = trans[l]
+                    break
+            result = {j: transtag}
 
     except UnboundLocalError as e:
         logger.info('无此tag的翻译')
@@ -461,7 +465,7 @@ def fetch_translated_tag_m(th_count) -> list:
                 logger.error(f'运行时出现错误: {th.exception()}')
         s = 0
         for r in result:
-            if list(r.values())[0] == 'None':
+            if r == 'None':
                 s += 1
         logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
     return result
@@ -473,11 +477,12 @@ def write_transtags_to_db_i(tran: dict):
     con = sqlite3.connect(SQLPATH)
     cur = con.cursor()
     cur.execute(f'''
-                UPDATE tags SET transtag = '{list(tran.values())[0]}' WHERE jptag = '{list(tran.keys())[0]}'
+                UPDATE tags SET transtag = "{list(tran.values())[0]}" WHERE jptag = "{list(tran.keys())[0]}"
                 ''')
     con.commit()
     con.close()
 
+    
 def write_transtags_to_db_m(th_count):
     '''
     将翻译后的tags提交至数据库tags
@@ -541,9 +546,9 @@ def transtag_return_m(th_count):
                 logger.error(f'运行时出现错误: {th.exception()}')
     logger.info('翻译后的tag已提交')
 
-URLs = analyse_bookmarks()
+#URLs = analyse_bookmarks()
 #debug:
-#URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=0&limit=5&rest=show&lang=zh']
+URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=54&limit=3&rest=show&lang=zh']
 
 
 illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
