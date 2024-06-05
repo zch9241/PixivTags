@@ -9,6 +9,8 @@ from time import sleep
 from urllib import parse
 import sys
 import traceback
+import re
+from difflib import get_close_matches
 
 from decrypt import *
 
@@ -88,6 +90,7 @@ def connection_handler(vars: list):
         return inner_wrapper
     return wrapper
 
+# 
 @connection_handler(['total_show', 'total_hide'])
 def analyse_bookmarks(rest_flag = 2, limit = 100) -> list:
     '''
@@ -275,21 +278,21 @@ def writeraw_to_db_i(illdata) -> list:
     olddata: list = cursor.fetchall()
     # 比较信息, 将不同之处添加至修改位置列表
     if olddata == []:     # 无信息
-        logger.debug('添加新信息')
+        # logger.debug('添加新信息')
         cursor.execute(f'''
                        INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})
                        ''')
         con.commit()
         status = ['0']
     elif olddata[0][1] == newdata[1]:
-        logger.debug('数据重复，无需添加')
+        # logger.debug('数据重复，无需添加')
         status = ['1']
     else:
         for i in range(len(olddata[0])):
             if olddata[0][i] != newdata[i]:
                 data_to_modify[i] = 1
         for i in range(len(data_to_modify)):
-            if data_to_modify[i] == 1 and i == 1:    #只修改jptag和is_private值
+            if data_to_modify[i] == 1 and i == 1:  # 只修改jptag和is_private值
                 # logger.debug('更新jptag数据, 修改is_translated值')
                 # 下面这里要加个""才行
                 cursor.execute(f'''
@@ -374,6 +377,8 @@ def write_tags_to_db_m(th_count):
             tags.extend(il_tag)
         # 移除重复元素
         tags = list(set(tags))
+        if len(tags) == 0:
+            logger.info('没有需要写入的tag')
         
         while len(tags) > 0:
             tag = tags.pop(0)
@@ -395,7 +400,7 @@ def fetch_translated_tag_i(j, priority = None) -> dict:
     - `:return` dict : {'原tag': '翻译后的tag'}
     '''
     priority = ['zh', 'en', 'zh_tw']
-    jf = parse.quote(j) # 转为URL编码
+    jf = parse.quote(j,safe='') # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
     
     options = webdriver.ChromeOptions()
     options.add_argument('log-level=3')
@@ -430,7 +435,8 @@ def fetch_translated_tag_i(j, priority = None) -> dict:
 
     except UnboundLocalError as e:
         logger.info('无此tag的翻译')
-        result = {j: 'None'}
+        #result = {j: 'None'}
+        result = {j: j}
     return result
 
 def fetch_translated_tag_m(th_count) -> list:
@@ -461,11 +467,9 @@ def fetch_translated_tag_m(th_count) -> list:
         for th in all_th:
             if th.result != None:
                 result.append(th.result())
-            if th.exception():
-                logger.error(f'运行时出现错误: {th.exception()}')
         s = 0
         for r in result:
-            if r == 'None':
+            if r.keys == r.values:
                 s += 1
         logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
     return result
@@ -474,59 +478,70 @@ def write_transtags_to_db_i(tran: dict):
     '''
     `tran`: 需要提交的tags (jp:tr)
     '''
-    con = sqlite3.connect(SQLPATH)
-    cur = con.cursor()
-    cur.execute(f'''
-                UPDATE tags SET transtag = "{list(tran.values())[0]}" WHERE jptag = "{list(tran.keys())[0]}"
-                ''')
-    con.commit()
-    con.close()
+    try:
+        con = sqlite3.connect(SQLPATH)
+        cur = con.cursor()
+        transtag = list(tran.values())[0]
+        jptag = list(tran.keys())[0]
+        #注意sql语句transtag用双引号！
+        #否则执行sql时会有syntax error
+        cur.execute(f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
+        con.commit()
+        con.close()
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.exception('捕获到异常: ')
+        logger.exception(tb)
 
-    
 def write_transtags_to_db_m(th_count):
     '''
-    将翻译后的tags提交至数据库tags
+    将翻译后的tags提交至表tags
     - 需要trans变量
     '''
     all_th = []
     logger.info(f'创建线程池，线程数量: {th_count}')
     with ThreadPoolExecutor(max_workers = th_count) as pool:
         for t in trans:
-            all_th.append(pool.submit(write_transtags_to_db_i, t))
+            exc = pool.submit(write_transtags_to_db_i, t)
+            all_th.append(exc)
         wait(all_th, return_when = ALL_COMPLETED)
-        for th in all_th:
-            if th.exception():
-                logger.error(f'运行时出现错误: {th.exception()}')
-    logger.info('翻译后的tag已提交')
+    logger.info('翻译后的tag已提交至表tags')
 
 def transtag_return_i(r0):
-    con = sqlite3.connect(SQLPATH)
-    cur = con.cursor()
+    try:
+        con = sqlite3.connect(SQLPATH)
+        cur = con.cursor()
 
-    pid, jptag0, transtag0, is_translated0, is_private0 = r0
-    jptags = eval(jptag0)
-    l = [''] * len(jptags)
-    for i in range(len(jptags)):
-        cur.execute('''
-                    SELECT * FROM tags
+        pid, jptag0, transtag0, is_translated0, is_private0 = r0
+        jptags = eval(jptag0)
+        l = [''] * len(jptags)
+        for i in range(len(jptags)):
+            cur.execute('''
+                        SELECT * FROM tags
+                        ''')
+            resp = cur.fetchall()
+            for r in resp:
+                jptag, transtag = r
+                if jptag == jptags[i]:
+                    l[i] = f'''""{transtag}""'''
+        # 注意transtag用三引号！
+        # 注意上文l[i]行表述
+        # 这两处均是为了兼顾python和sql语法
+        cur.execute(f'''
+                    UPDATE illusts SET transtag = """{l}""" WHERE pid = {pid}
                     ''')
-        resp = cur.fetchall()
-        for r in resp:
-            jptag, transtag = r
-            if jptag == jptags[i]:
-                l[i] = transtag
-    cur.execute(f'''
-                UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
-                ''')
-    cur.execute(f'''
-                UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
-                ''')
-    con.commit()
-    # logger.debug(l)
+        cur.execute(f'''
+                    UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
+                    ''')
+        con.commit()
+        # logger.debug(l)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.exception(f'{tb}\n{l}\n{pid}')
 
 def transtag_return_m(th_count):
     '''
-    上传翻译后的tags至illust表
+    上传翻译后的tags至表illust
     '''
     all_th = []
     logger.info(f'创建线程池，线程数量: {th_count}')
@@ -541,14 +556,52 @@ def transtag_return_m(th_count):
             all_th.append(pool.submit(transtag_return_i, r0))
         
         wait(all_th, return_when = ALL_COMPLETED)
-        for th in all_th:
-            if th.exception():
-                logger.error(f'运行时出现错误: {th.exception()}')
-    logger.info('翻译后的tag已提交')
+    logger.info('翻译后的tag已提交至表illust')
+
+def mapping() -> dict:
+    '''
+    将illust表中存储的数据转换为tag对pid的映射
+    '''
+    logger.info('开始构建tag对pid的映射')
+    
+    con = sqlite3.connect(SQLPATH)
+    cur = con.cursor()
+    cur.execute('SELECT pid,transtag FROM illusts')
+    res = cur.fetchall()
+    con.close()
+    
+    pid__tag = []   # pid对应的tag
+    tag__pid = {}   # tag对应的pid
+    
+    def formater(pid, string:str) -> dict:
+        '''
+        将数据库中的数据格式化
+        来自文心一言
+        '''
+        s = string.strip('"').replace('\\', '').replace('\"', '"') 
+        matches = re.findall(r'"([^"]+?)"', s)
+        return {pid: matches}
+    for r in res:
+        pid__tag.append(formater(r[0], r[1]))
+        
+    logger.info(f'从数据库获取的数据解析完成，共有 {len(pid__tag)} 个pid')
+
+    for p in pid__tag:
+        for key, value_list in p.items():
+            for value in value_list:
+                if value in tag__pid:
+                    # 如果值已经存在，将原字典的键添加到该值的列表中
+                    tag__pid[value].append(key)
+                else:
+                    # 如果值不存在，创建一个新的列表并添加原字典的键
+                    tag__pid[value] = [key]
+    logger.info(f'映射构建完成，共 {len(tag__pid)} 对')
+    return tag__pid
+
 
 #URLs = analyse_bookmarks()
 #debug:
-URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=54&limit=3&rest=show&lang=zh']
+URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=0&limit=100&rest=show&lang=zh']
 
 
 illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
@@ -572,8 +625,28 @@ write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS)
 
 transtag_return_m(TRANSTAG_RETURN_THREADS)
 
-a=1
+map_result = mapping()
 
 
+logger.info('数据操作全部完成')
+logger.info('进入交互模式，键入exit以退出')
 
+while True:
+    print('>>>', end = '')
+    search = input()
+    if search == 'exit':
+        break
+    else:
+        keys = list(map_result.keys())
+        target_keys = get_close_matches(search, keys, n = 8, cutoff = 0.1)
+        if len(target_keys) > 1:
+            print(f'可能的结果: {target_keys}')
+            target_key = input('请选择其中一个结果: ')
+            while not target_key in target_keys:
+                print('未匹配, 请重新选择: ')
+            print(f'pids: {map_result[target_key]}')
+        else:
+            target_key = target_keys[0]
+            print(f'pids: {map_result[target_key]}')
 
+logger.info('程序执行完成')
