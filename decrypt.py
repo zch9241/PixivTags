@@ -10,29 +10,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import ctypes
 from ctypes import wintypes
 
-import config
 
-update_cookies = config.UPDATE_COOKIES
 cwd = os.getcwd()
-
-
-if update_cookies == True:
-    # 定义cookie、localstate、logindata三个文件的位置
-    cookie_path = os.path.expanduser(os.path.join(
-        os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data\Default\Network\Cookies'))
-
-    local_state_path = os.path.join(
-        os.environ['LOCALAPPDATA'], r"Google\Chrome\User Data\Local State")
-
-    login_data_path = os.path.expanduser(os.path.join(
-        os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data\Default\Login Data'))
-
-    # 复制对应文件(后续debug用)
-    shutil.copy(cookie_path, cwd + r'\src\Cookies')
-    shutil.copy(local_state_path, cwd + r'\src\Local State')
-    shutil.copy(login_data_path, cwd + r'\src\Login Data')
-
-# 重定向cookie、localstate、logindata三个文件的位置
+# 定义cookie、localstate、logindata三个文件的位置
 cookie_path = cwd + r'\src\Cookies'
 local_state_path = cwd + r'\src\Local State'
 login_data_path = cwd + r'\src\Login Data'
