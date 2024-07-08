@@ -33,8 +33,10 @@ UID = config.UID
 COOKIE_EXPIRED_TIME = config.COOKIE_EXPIRED_TIME
 
 CWD = os.getcwd()
-SQLPATH = CWD + '\src\illdata.db'
-COOKIE_PATH = CWD + '\src\Cookies'
+SQLPATH = CWD + r'\src\illdata.db'
+COOKIE_PATH = CWD + r'\src\Cookies'
+TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
+CHROME_DRIVER_PATH = CWD + r'\bin\chromedriver.exe' 
 
 # 交互模式的保留字
 reserve_words = {'help': '_help()', 'exit': '_exit()',
@@ -53,6 +55,8 @@ logger.addHandler(handler)
 # Toast初始化
 toaster = ToastNotifier()
 
+
+# 获取cookies
 def get_cookies(rtime: int):
     """获取Google Chrome的cookies
 
@@ -158,7 +162,7 @@ def connection_handler(vars: list):
                             logger.warning(f'相关变量: {var}')
 
                 else:
-                    logger.error(f'未知错误 {sys.exc_info}')
+                    logger.error(f'其他错误 {sys.exc_info()}')
                     tb = sys.exc_info()[2]
                     tb_list = traceback.format_tb(tb)
                     print("".join(tb_list))
@@ -188,7 +192,7 @@ def analyse_bookmarks(rest_flag=2, limit=100) -> list:
         logger.debug('创建driver实例')
 
         options = webdriver.ChromeOptions()
-        options.add_argument('log-level=3')
+        options.add_argument('--log-level=3')
         options.add_argument('--disable-gpu')
         options.add_argument('--headless')
         driver = webdriver.Chrome(options=options)
@@ -272,12 +276,14 @@ def analyse_illusts_i(url) -> list:
     解析所有插画的信息
     - i就是individual的意思, 子线程
     -  `url`: 接口URL
-    - `:return`: 插画信息的列表
+    - `:return`: 插画信息的列表, 忽略插画数量
     '''
+
     illustdata = []
+    ignores = 0
 
     options = webdriver.ChromeOptions()
-    options.add_argument('log-level=3')
+    options.add_argument('--log-level=3')
     options.add_argument('--disable-gpu')
     options.add_argument('--headless')
     driver = webdriver.Chrome(options=options)
@@ -297,12 +303,17 @@ def analyse_illusts_i(url) -> list:
             By.CSS_SELECTOR, 'body > pre'
         ).text
     )
+
     idata = resp['body']['works']
     for ildata in idata:
-        illustdata.append(ildata)
+        if ildata['isMasked'] == True:
+            logger.info(f"此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
+            ignores += 1
+        else:
+            illustdata.append(ildata)
 
     sleep(0.1)
-    return illustdata
+    return illustdata, ignores
 
 
 def analyse_illusts_m(th_count) -> list:
@@ -313,18 +324,20 @@ def analyse_illusts_m(th_count) -> list:
     '''
     illdata = []
     all_th = []
+    ignores = 0
     logger.info(f'创建线程池，线程数量: {th_count}')
     with ThreadPoolExecutor(max_workers=th_count) as pool:
         for u in URLs:
             all_th.append(pool.submit(analyse_illusts_i, u))
-
         wait(all_th, return_when=ALL_COMPLETED)
         logger.info('所有线程运行完成')
         # 获取各线程返回值
         for t_res in all_th:
-            illdata.extend(t_res.result())
-        logger.info(f'所有插画信息获取完成, 长度: {len(illdata)}')
-
+            ill, ign = t_res.result()
+            if not type(ill) == type(None):
+                illdata.extend(ill)
+            ignores += ign
+        logger.info(f'所有插画信息获取完成, 长度: {len(illdata)} 忽略数量: {ignores}')
     return illdata
 
 
@@ -477,20 +490,31 @@ def write_tags_to_db_m(th_count):
             f"所有线程运行完成, 添加: {result.count('0')}  跳过: {result.count('1')}")
 
 
+i_count = 0
+def notify_formatter(step=0.05):
+    nflag = {}
+    progress = 0
+    while progress <= 1:
+        progress += step
+        nflag[progress] = False
+    return nflag
+nflag = notify_formatter()
 @connection_handler(['connection_handler_trigger'])
-def fetch_translated_tag_i(j, priority=None) -> dict:
+def fetch_translated_tag_i(j, tot, priority=None) -> dict:
     '''
     发送请求获取翻译后的tag
     - `j`: tag的名称
+    - `tot`: tags总数
     - `priority`: 语言优先级
     - `:return` dict : {'原tag': '翻译后的tag'}
     '''
+    global i_count
     priority = ['zh', 'en', 'zh_tw']
     # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
     jf = parse.quote(j, safe='')
 
     options = webdriver.ChromeOptions()
-    options.add_argument('log-level=3')
+    options.add_argument('--log-level=3')
     options.add_argument('--disable-gpu')
     options.add_argument('--headless')
     driver = webdriver.Chrome(options=options)
@@ -506,11 +530,22 @@ def fetch_translated_tag_i(j, priority=None) -> dict:
             By.CSS_SELECTOR, 'body > pre'
         ).text
     )
-    try:
+    if type(resp) == type(None):
+        logger.warning(f'服务器返回值不正确 此次请求tag: {j}')
+        with open(TAG_LOG_PATH, 'a') as f:
+            f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
+            f.write(f'请求tag {j}')
+            f.write('\n')
+            f.close()
+        logger.info('失败的tag已写入日志')
+    else:
         connection_handler_trigger = resp['body']['tagTranslation']
+        transtag = ''
         if connection_handler_trigger == []:
             # print(connection_handler_trigger)
-            raise UnboundLocalError
+            logger.info(f'无tag {j} 的翻译')
+            # result = {j: 'None'}
+            result = {j: j}
         else:
             trans: dict = connection_handler_trigger[j]  # 包含所有翻译语言的dict
             lans = trans.keys()
@@ -518,12 +553,18 @@ def fetch_translated_tag_i(j, priority=None) -> dict:
                 if l in lans and trans[l] != '':
                     transtag = trans[l]
                     break
-            result = {j: transtag}
+            if transtag == '':
+                logger.info(f'tag {j} 无目标语言的翻译/无需翻译 & 可用的语言 {trans.keys()}')
+                result = {j: j}
+            else:
+                result = {j: transtag}
 
-    except UnboundLocalError as e:
-        logger.info('无此tag的翻译')
-        # result = {j: 'None'}
-        result = {j: j}
+    i_count+=1
+
+    for i in nflag:
+        if i_count / tot > i and nflag[i] == False:
+            logger.info(f'fetch_translated_tag 当前进度(近似值): {i}')
+            nflag[i] = True
     return result
 
 
@@ -549,7 +590,7 @@ def fetch_translated_tag_m(th_count) -> list:
     with ThreadPoolExecutor(max_workers=th_count) as pool:
         all_th = []
         for j in jptags:
-            all_th.append(pool.submit(fetch_translated_tag_i, j))
+            all_th.append(pool.submit(fetch_translated_tag_i, j, len(jptags)))
 
         wait(all_th, return_when=ALL_COMPLETED)
         for th in all_th:
@@ -557,8 +598,9 @@ def fetch_translated_tag_m(th_count) -> list:
                 result.append(th.result())
         s = 0
         for r in result:
-            if r.keys == r.values:
-                s += 1
+            if type(r) != type(None):
+                if r.keys == r.values:  # 对应子线程相关处理方法
+                    s += 1
         logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
     return result
 
@@ -755,11 +797,11 @@ if __name__ == '__main__':
         mode = int(input('模式 = '))
         if mode == 1:
             cookie = get_cookies(rtime=COOKIE_EXPIRED_TIME)
-            # URLs = analyse_bookmarks()
+            URLs = analyse_bookmarks()
             # debug:
-            URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=0&limit=100&rest=show&lang=zh']
+            # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
-
+            
             illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
             # debug:
             # illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
