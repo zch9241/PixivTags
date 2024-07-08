@@ -17,6 +17,7 @@ import shutil
 import os
 import sqlite3
 from win10toast import ToastNotifier
+import pandas as pd
 
 import decrypt
 import config
@@ -74,6 +75,7 @@ def get_cookies(rtime: int):
     relative_time = time.time() - mod_time
     if relative_time < rtime:
         update_cookies = False
+        logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
     else:
         update_cookies = True
         logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
@@ -446,7 +448,9 @@ def write_tags_to_db_i(tag) -> list:
     except sqlite3.IntegrityError as e:
         # logger.debug(f'出现重复tag: {e}', exc_info = True)
         status = ['1']
-        pass
+    except sqlite3.OperationalError:
+        logger.error(f'SQLite操作错误，重试: {sys.exc_info()}')
+        status = write_tags_to_db_i(tag)
     con.close()
     return status
 
@@ -491,7 +495,7 @@ def write_tags_to_db_m(th_count):
 
 
 i_count = 0
-def notify_formatter(step=0.05):
+def notify_formatter(step=0.02):
     nflag = {}
     progress = 0
     while progress <= 1:
@@ -518,7 +522,12 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
     options.add_argument('--disable-gpu')
     options.add_argument('--headless')
     driver = webdriver.Chrome(options=options)
-    driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
+    def get():
+        try:
+            driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
+        except Exception as e:
+            logger.error(f'请求网址时出错,重试 {sys.exc_info()}')
+            get()
     for cok in cookie:
         driver.add_cookie(cok)
     driver.refresh()
@@ -554,7 +563,14 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
                     transtag = trans[l]
                     break
             if transtag == '':
-                logger.info(f'tag {j} 无目标语言的翻译/无需翻译 & 可用的语言 {trans.keys()}')
+                av = []
+                for available in trans.values():
+                    if available != '':
+                        # 是否有不用遍历的方法?
+                        for _ in trans.keys():
+                           if trans[_] == available:
+                               av.append(_)
+                logger.info(f'tag {j} 无目标语言的翻译 & 可用的语言 {av}')
                 result = {j: j}
             else:
                 result = {j: transtag}
@@ -612,8 +628,11 @@ def write_transtags_to_db_i(tran: dict):
     try:
         con = sqlite3.connect(SQLPATH)
         cur = con.cursor()
-        transtag = list(tran.values())[0]
-        jptag = list(tran.keys())[0]
+        if type(tran) == type(None):
+            logger.warning('参数为NoneType类型，忽略')
+        else:
+            transtag = list(tran.values())[0]
+            jptag = list(tran.keys())[0]
         # 注意sql语句transtag用双引号！
         # 否则执行sql时会有syntax error
         cur.execute(
@@ -622,9 +641,9 @@ def write_transtags_to_db_i(tran: dict):
         con.close()
     except Exception as e:
         tb = traceback.format_exc()
-        logger.exception('捕获到异常: ')
+        logger.exception(f'捕获到异常: {sys.exc_info()}')
         logger.exception(tb)
-
+        write_transtags_to_db_i(tran)
 
 def write_transtags_to_db_m(th_count):
     '''
@@ -645,30 +664,32 @@ def transtag_return_i(r0):
     try:
         con = sqlite3.connect(SQLPATH)
         cur = con.cursor()
-
-        pid, jptag0, transtag0, is_translated0, is_private0 = r0
-        jptags = eval(jptag0)
-        l = [''] * len(jptags)
-        for i in range(len(jptags)):
-            cur.execute('''
-                        SELECT * FROM tags
+        if type(r0) != type(None):
+            pid, jptag0, transtag0, is_translated0, is_private0 = r0
+            jptags = eval(jptag0)
+            l = [''] * len(jptags)
+            for i in range(len(jptags)):
+                cur.execute('''
+                            SELECT * FROM tags
+                            ''')
+                resp = cur.fetchall()
+                for r in resp:
+                    jptag, transtag = r
+                    if jptag == jptags[i]:
+                        l[i] = f'''""{transtag}""'''
+            # 注意transtag用三引号！
+            # 注意上文l[i]行表述
+            # 这两处均是为了兼顾python和sql语法
+            cur.execute(f'''
+                        UPDATE illusts SET transtag = """{l}""" WHERE pid = {pid}
                         ''')
-            resp = cur.fetchall()
-            for r in resp:
-                jptag, transtag = r
-                if jptag == jptags[i]:
-                    l[i] = f'''""{transtag}""'''
-        # 注意transtag用三引号！
-        # 注意上文l[i]行表述
-        # 这两处均是为了兼顾python和sql语法
-        cur.execute(f'''
-                    UPDATE illusts SET transtag = """{l}""" WHERE pid = {pid}
-                    ''')
-        cur.execute(f'''
-                    UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
-                    ''')
-        con.commit()
-        # logger.debug(l)
+            cur.execute(f'''
+                        UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
+                        ''')
+            con.commit()
+            # logger.debug(l)
+        else:
+            logger.warning('参数为NoneType类型，忽略')
     except Exception as e:
         tb = traceback.format_exc()
         logger.exception(f'{tb}\n{l}\n{pid}')
@@ -731,69 +752,25 @@ def mapping() -> dict:
                     # 如果值不存在，创建一个新的列表并添加原字典的键
                     tag__pid[value] = [key]
     logger.info(f'映射构建完成，共 {len(tag__pid)} 对')
+    
+    # 补全空值，方便后续创建dataframe对象
+    maxlen = 0
+    for t in tag__pid:
+        tmp = len(tag__pid[t])
+        if tmp > maxlen:
+            maxlen = tmp
+    for t in tag__pid:
+        tmp = len(tag__pid[t])
+        if tmp < maxlen:
+            tag__pid[t].extend([None]*(maxlen-tmp))
+    logger.info('补齐空值完成')
     return tag__pid
 
 
-# 交互模式相关函数
-def _help():
-    print('''
-这是交互模式的使用说明
-`help`: 显示帮助
-`exit`: 退出交互模式
-`search`: 搜索关键词
-`list`: 列出所有关键词(危险操作)
-`hot`: 列出出现最多的10个关键词
-          ''')
-
-
-def _search():
-    key = ''
-    while key == '':
-        print('输入关键词以进行查询:')
-        key = input()
-
-        keys = list(map_result.keys())
-        target_keys = get_close_matches(key, keys, n=8, cutoff=0.1)
-        if len(target_keys) > 1:
-            print(f'可能的结果: {target_keys}')
-            target_key = input('请选择其中一个结果: ')
-            while not target_key in target_keys:
-                print('未匹配, 请重新选择: ')
-            print(f'pids: {map_result[target_key]}')
-        else:
-            target_key = target_keys[0]
-            print(f'pids: {map_result[target_key]}')
-
-
-def _exit():
-    logger.info('程序执行完成')
-    exit()
-
-
-def _list():
-    for r in map_result:
-        print(r)
-
-
-def _hot():
-    i = 0
-    count = {}
-    for r in map_result:
-        count[r] = len(map_result[r])
-    counts = sorted(count.values(), reverse=True)[:9]
-
-    for k in count.keys():
-        v = count[k]
-        if i < 10:
-            if v in counts:
-                print(f'{k}: {v}')
-                i += 1
-        else:
-            break
 
 if __name__ == '__main__':
     while True:
-        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索')
+        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-退出')
         mode = int(input('模式 = '))
         if mode == 1:
             cookie = get_cookies(rtime=COOKIE_EXPIRED_TIME)
@@ -804,10 +781,10 @@ if __name__ == '__main__':
             
             illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
             # debug:
-            # illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
-            # {'id': '117717637', 'title': 'おしごと終わりにハグしてくれる天使', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 4, 'url': 'https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2024/04/10/17/30/02/117717637_p0_custom1200.jpg', 'description': '', 'tags': ['オリジナル', '女の子', '緑髪', '天使', 'ハグ', '巨乳', 'ぱんつ', 'オリジナル1000users入り'], 'userId': '29164302', 'userName': '緑風マルト🌿', 'width': 1296, 'height': 1812, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25109862018', 'private': False}, 'alt': '#オリジナル おしごと終わりにハグしてくれる天使 - 緑風マルト🌿的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2024-04-10T17:30:02+09:00', 'updateDate': '2024-04-10T17:30:02+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 1, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2024/01/25/15/56/10/25434619_c70d86172914664ea2b15cec94bc0afd_50.png'},
-            # {'id': '84450882', 'title': 'ネコ耳墨ちゃん🐈', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/09/18/19/44/35/84450882_p0_square1200.jpg', 'description': '', 'tags': ['彼女、お借りします', 'かのかり', '桜沢墨', '猫', '猫耳', '制服', '白ニーソ', '拾ってください', '彼女、お借りします5000users入り'], 'userId': '38436050', 'userName': 'ゆきうなぎ＠土曜東ス88a', 'width': 2894, 'height': 4093, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '24948220443', 'private': False}, 'alt': '#彼女、お借りします ネコ耳墨ちゃん🐈 - ゆきうなぎ＠土曜東ス88a的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-09-18T19:44:35+09:00', 'updateDate': '2020-09-18T19:44:35+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2020/02/22/00/11/25/17966339_a51ca7e8a3aca581fc87021488e21479_50.jpg'},
-            # ]
+            #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
+            #{'id': '117717637', 'title': 'おしごと終わりにハグしてくれる天使', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 4, 'url': 'https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2024/04/10/17/30/02/117717637_p0_custom1200.jpg', 'description': '', 'tags': ['オリジナル', '女の子', '緑髪', '天使', 'ハグ', '巨乳', 'ぱんつ', 'オリジナル1000users入り'], 'userId': '29164302', 'userName': '緑風マルト🌿', 'width': 1296, 'height': 1812, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25109862018', 'private': False}, 'alt': '#オリジナル おしごと終わりにハグしてくれる天使 - 緑風マルト🌿的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2024-04-10T17:30:02+09:00', 'updateDate': '2024-04-10T17:30:02+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 1, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2024/01/25/15/56/10/25434619_c70d86172914664ea2b15cec94bc0afd_50.png'},
+            #{'id': '84450882', 'title': 'ネコ耳墨ちゃん🐈', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/09/18/19/44/35/84450882_p0_square1200.jpg', 'description': '', 'tags': ['彼女、お借りします', 'かのかり', '桜沢墨', '猫', '猫耳', '制服', '白ニーソ', '拾ってください', '彼女、お借りします5000users入り'], 'userId': '38436050', 'userName': 'ゆきうなぎ＠土曜東ス88a', 'width': 2894, 'height': 4093, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '24948220443', 'private': False}, 'alt': '#彼女、お借りします ネコ耳墨ちゃん🐈 - ゆきうなぎ＠土曜東ス88a的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-09-18T19:44:35+09:00', 'updateDate': '2020-09-18T19:44:35+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2020/02/22/00/11/25/17966339_a51ca7e8a3aca581fc87021488e21479_50.jpg'},
+            #]
 
 
             writeraw_to_db_m(WRITERAW_TO_DB_THREADS)
@@ -826,8 +803,47 @@ if __name__ == '__main__':
             toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
         elif mode == 2:
             map_result = mapping()
+            df = pd.DataFrame(map_result)
             logger.info('数据操作全部完成')
             logger.info('进入交互模式')
+            
+            # 交互模式相关函数
+            def _help():
+                print('''
+            这是交互模式的使用说明
+            `help`: 显示帮助
+            `exit`: 退出主程序
+            `search`: 搜索tags
+            `list`: 列出所有tags(危险操作)
+            `hot`: 列出出现最多的10个tags
+                    ''')
+            def _search():
+                key = ''
+                while key == '':
+                    print('输入关键词以进行查询:')
+                    key = input()
+
+                    keys = list(map_result.keys())
+                    target_keys = get_close_matches(key, keys, n=8, cutoff=0.1)
+                    if len(target_keys) > 1:
+                        print(f'可能的结果: {target_keys}')
+                        target_key = input('请选择其中一个结果: ')
+                        while not target_key in target_keys:
+                            print('未匹配, 请重新选择: ')
+                        print(f'pids: {map_result[target_key]}')
+                    else:
+                        target_key = target_keys[0]
+                        print(f'pids: {map_result[target_key]}')
+            def _exit():
+                logger.info('程序执行完成')
+                exit()
+            def _list():
+                print(df)
+            def _hot():
+                print('获取的tags数目: ')
+                num = int(input())
+                ser = df.count().sort_values(ascending = False).head(num)
+                print(ser)
             _help()
             while True:
                 print('>>>', end='')
@@ -837,6 +853,9 @@ if __name__ == '__main__':
                 else:
                     print('未知的指令')
                 print('')
+        elif mode == 3:
+            logger.info('程序退出')
+            break
         else:
             print('未知的指令')
         print('')
