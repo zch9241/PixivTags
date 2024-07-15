@@ -129,9 +129,33 @@ def get_cookies(rtime: int):
     for data in cookies:
         cookie.append(
             {'name': data[1], 'value': decrypt.chrome_decrypt(data[2]), 'domain': data[0]})
+    cookies = decrypt.query_cookie(".www.pixiv.net")
+    for data in cookies:
+        cookie.append(
+            {'name': data[1], 'value': decrypt.chrome_decrypt(data[2]), 'domain': data[0]})
 
     logger.info(f'解密完成，数量 {len(cookie)}')
     return cookie
+
+
+# 数据库相关操作
+def dbexecute(sql):
+    '''
+    数据库操作
+    '''
+    try:
+        con = sqlite3.connect(SQLPATH)
+        cur = con.cursor()
+        cur.execute(sql)
+        con.commit()
+        res = cur.fetchall()
+        cur.close()
+        con.close()
+        return res
+    except Exception:
+        logger.error(f'数据库操作错误 {sys.exc_info()}')
+        res = dbexecute(sql)
+        return res
 
 
 # 获取pixiv上的tags
@@ -297,7 +321,7 @@ def analyse_illusts_i(url) -> list:
 
     WebDriverWait(driver, 10).until(
         EC.presence_of_all_elements_located)
-    # logger.debug('接口所有元素加载完毕，准备解析...')
+    logger.debug('接口所有元素加载完毕，准备解析...')
 
     # 解析每张插画的信息，添加到列表
     resp: dict = json.loads(
@@ -305,7 +329,7 @@ def analyse_illusts_i(url) -> list:
             By.CSS_SELECTOR, 'body > pre'
         ).text
     )
-
+    driver.close()
     idata = resp['body']['works']
     for ildata in idata:
         if ildata['isMasked'] == True:
@@ -316,30 +340,47 @@ def analyse_illusts_i(url) -> list:
 
     sleep(0.1)
     return illustdata, ignores
-
-
-def analyse_illusts_m(th_count) -> list:
+def analyse_illusts_m(th_count, urls, recursion = 0) -> list:
     '''
     analyse_illusts_i的主线程, 整合信息
     - `th_count`: 线程数量
-    - 需要URLs变量
+    - `urls`: 请求url列表
+    - `recursion`: 判断递归次数
     '''
     illdata = []
-    all_th = []
+    all_th = {}
+    retry_urls = []
     ignores = 0
+    recursion += 1
+    
     logger.info(f'创建线程池，线程数量: {th_count}')
     with ThreadPoolExecutor(max_workers=th_count) as pool:
-        for u in URLs:
-            all_th.append(pool.submit(analyse_illusts_i, u))
-        wait(all_th, return_when=ALL_COMPLETED)
+        for u in urls:
+            all_th[u] = pool.submit(analyse_illusts_i, u)
+        wait(all_th.values(), return_when=ALL_COMPLETED)
         logger.info('所有线程运行完成')
         # 获取各线程返回值
-        for t_res in all_th:
-            ill, ign = t_res.result()
-            if not type(ill) == type(None):
-                illdata.extend(ill)
-            ignores += ign
-        logger.info(f'所有插画信息获取完成, 长度: {len(illdata)} 忽略数量: {ignores}')
+        for u, t_res in all_th.items():
+            result = t_res.result()
+            if type(result) != type(None):
+                ill, ign = result
+                if not type(ill) == type(None):
+                    illdata.extend(ill)
+                    ignores += ign
+            else:
+                logger.warning('线程池中某个函数返回了None, 在循环结束后将递归重试')
+                retry_urls.append(u)
+        
+    if retry_urls != [] and recursion <= 10:
+        logger.info('出现重试可能为装饰器部分的问题，请检查装饰器是否打印了报错信息')
+        logger.info(f'需要重试的url数量 {len(retry_urls)} 开始重试')
+        retrydata = analyse_illusts_m(th_count, retry_urls, recursion)
+        illdata.extend(retrydata)
+        
+    if recursion > 1:  
+        logger.info(f'重试完成，总插画数量: {len(illdata)}，忽略数量: {ignores}，递归次数: {recursion}') 
+    else:
+        logger.info(f'所有插画信息获取完成，长度: {len(illdata)} 忽略数量: {ignores}')
     return illdata
 
 
@@ -347,9 +388,6 @@ def writeraw_to_db_i(illdata) -> list:
     '''
     `:return`: 状态
     '''
-    # 一个线程对应一个connection
-    con = sqlite3.connect(SQLPATH)
-    cursor = con.cursor()
     # 新数据
     pid = int(illdata['id'])
     jptag = str(illdata['tags'])
@@ -367,17 +405,14 @@ def writeraw_to_db_i(illdata) -> list:
            3: ['is_translated', is_translated], 4: ['is_private', is_private]}
 
     # 先查询已有信息，再判断是否需要修改
-    cursor.execute(f'''
-                   SELECT * FROM illusts WHERE pid = {pid}
-                   ''')
-    olddata: list = cursor.fetchall()
+    sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
+    olddata: list = dbexecute(sql)
     # 比较信息, 将不同之处添加至修改位置列表
     if olddata == []:     # 无信息
         # logger.debug('添加新信息')
-        cursor.execute(f'''
-                       INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})
-                       ''')
-        con.commit()
+        
+        sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
+        dbexecute(sql)
         status = ['0']
     elif olddata[0][1] == newdata[1]:
         # logger.debug('数据重复，无需添加')
@@ -390,26 +425,20 @@ def writeraw_to_db_i(illdata) -> list:
             if data_to_modify[i] == 1 and i == 1:  # 只修改jptag和is_private值
                 # logger.debug('更新jptag数据, 修改is_translated值')
                 # 下面这里要加个""才行
-                cursor.execute(f'''
+                dbexecute(f'''
                                 UPDATE illusts SET {var[1][0]} = "{var[1][1]}" where pid = {pid}
                                 ''')
-                con.commit()
-                cursor.execute(f'''
+                dbexecute(f'''
                                 UPDATE illusts SET {var[3][0]} = {var[3][1]} where pid = {pid}
                                 ''')
-                con.commit()
 
             elif data_to_modify[i] == 1 and i == 4:
                 # logger.debug('更新is_privated数据')
-                cursor.execute(f'''
+                dbexecute(f'''
                                 UPDATE illusts SET {var[4][0]} = {var[4][1]} where pid = {pid}
                                 ''')
-                con.commit()
             status = ['2']
-    con.close()
     return status
-
-
 def writeraw_to_db_m(th_count):
     '''
     将所有tag提交至数据库
@@ -453,8 +482,6 @@ def write_tags_to_db_i(tag) -> list:
         status = write_tags_to_db_i(tag)
     con.close()
     return status
-
-
 def write_tags_to_db_m(th_count):
     '''
     提交原始tags
@@ -526,8 +553,9 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
         try:
             driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
         except Exception as e:
-            logger.error(f'请求网址时出错,重试 {sys.exc_info()}')
+            logger.error(f'请求tag接口时出错,重试 {sys.exc_info()}')
             get()
+    get()
     for cok in cookie:
         driver.add_cookie(cok)
     driver.refresh()
@@ -539,6 +567,8 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
             By.CSS_SELECTOR, 'body > pre'
         ).text
     )
+    
+    driver.close()
     if type(resp) == type(None):
         logger.warning(f'服务器返回值不正确 此次请求tag: {j}')
         with open(TAG_LOG_PATH, 'a') as f:
@@ -582,8 +612,6 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
             logger.info(f'fetch_translated_tag 当前进度(近似值): {i}')
             nflag[i] = True
     return result
-
-
 def fetch_translated_tag_m(th_count) -> list:
     jptags = []
     result = []
@@ -641,10 +669,9 @@ def write_transtags_to_db_i(tran: dict):
         con.close()
     except Exception as e:
         tb = traceback.format_exc()
-        logger.exception(f'捕获到异常: {sys.exc_info()}')
+        logger.exception(f'捕获到异常，重试: {sys.exc_info()}')
         logger.exception(tb)
         write_transtags_to_db_i(tran)
-
 def write_transtags_to_db_m(th_count):
     '''
     将翻译后的tags提交至表tags
@@ -692,9 +719,8 @@ def transtag_return_i(r0):
             logger.warning('参数为NoneType类型，忽略')
     except Exception as e:
         tb = traceback.format_exc()
-        logger.exception(f'{tb}\n{l}\n{pid}')
-
-
+        logger.exception(f'捕获到错误: {tb}\n{l}\n{pid}')
+        transtag_return_i(r0)
 def transtag_return_m(th_count):
     '''
     上传翻译后的tags至表illust
@@ -773,13 +799,14 @@ if __name__ == '__main__':
         print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-退出')
         mode = int(input('模式 = '))
         if mode == 1:
+            start = time.time()
             cookie = get_cookies(rtime=COOKIE_EXPIRED_TIME)
             URLs = analyse_bookmarks()
             # debug:
             # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
-            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS)
+            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs)
             # debug:
             #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
             #{'id': '117717637', 'title': 'おしごと終わりにハグしてくれる天使', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 4, 'url': 'https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2024/04/10/17/30/02/117717637_p0_custom1200.jpg', 'description': '', 'tags': ['オリジナル', '女の子', '緑髪', '天使', 'ハグ', '巨乳', 'ぱんつ', 'オリジナル1000users入り'], 'userId': '29164302', 'userName': '緑風マルト🌿', 'width': 1296, 'height': 1812, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25109862018', 'private': False}, 'alt': '#オリジナル おしごと終わりにハグしてくれる天使 - 緑風マルト🌿的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2024-04-10T17:30:02+09:00', 'updateDate': '2024-04-10T17:30:02+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 1, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2024/01/25/15/56/10/25434619_c70d86172914664ea2b15cec94bc0afd_50.png'},
@@ -799,8 +826,9 @@ if __name__ == '__main__':
             write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS)
 
             transtag_return_m(TRANSTAG_RETURN_THREADS)
-            
+            end = time.time()
             toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
+            logger.info(f'总耗时: {end-start} 秒')
         elif mode == 2:
             map_result = mapping()
             df = pd.DataFrame(map_result)
@@ -859,3 +887,4 @@ if __name__ == '__main__':
         else:
             print('未知的指令')
         print('')
+5

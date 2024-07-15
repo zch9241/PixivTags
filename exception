@@ -1,0 +1,13 @@
+"""
+[2024-07-08 21:17:34,368 logger 91700 inner_wrapper] ERROR 其他错误 (<class 'selenium.common.exceptions.InvalidCookieDomainException'>, InvalidCookieDomainException(), <traceback object at 0x000001374E1BBEC0>)
+  File "C:\Users\Lenovo\Desktop\__MyCode\PixivTags\main.py", line 170, in inner_wrapper
+    return func(*args, **kwargs)
+  File "C:\Users\Lenovo\Desktop\__MyCode\PixivTags\main.py", line 545, in fetch_translated_tag_i
+    driver.add_cookie(cok)
+  File "c:\Users\Lenovo\AppData\Local\Programs\Python\Python310\lib\site-packages\selenium\webdriver\remote\webdriver.py", line 636, in add_cookie     
+    self.execute(Command.ADD_COOKIE, {"cookie": cookie_dict})
+  File "c:\Users\Lenovo\AppData\Local\Programs\Python\Python310\lib\site-packages\selenium\webdriver\remote\webdriver.py", line 347, in execute        
+    self.error_handler.check_response(response)
+  File "c:\Users\Lenovo\AppData\Local\Programs\Python\Python310\lib\site-packages\selenium\webdriver\remote\errorhandler.py", line 229, in check_response
+    raise exception_class(message, screen, stacktrace)
+"""
