@@ -58,7 +58,7 @@ toaster = ToastNotifier()
 
 
 # 获取cookies
-def get_cookies(rtime: int):
+def get_cookies(rtime: int) -> list:
     """获取Google Chrome的cookies
 
     Args:
@@ -141,7 +141,7 @@ def get_cookies(rtime: int):
 # 数据库相关操作
 def dbexecute(sql):
     '''
-    数据库操作
+    通用的数据库操作函数
     '''
     try:
         con = sqlite3.connect(SQLPATH)
@@ -153,14 +153,14 @@ def dbexecute(sql):
         con.close()
         return res
     except Exception:
-        logger.error(f'数据库操作错误 {sys.exc_info()}')
+        logger.error(f'数据库操作错误，重试 {sys.exc_info()}')
         res = dbexecute(sql)
         return res
 
 
-# 获取pixiv上的tags
-def connection_handler(vars: list):
-    """对pixiv远程服务器返回非预期值的处理
+# 获取pixiv上的tags并翻译
+def connection_handler():
+    """对爬虫函数抛出Exception的处理
 
     Args:
         vars (list): 可能出现解析错误的变量列表
@@ -170,33 +170,15 @@ def connection_handler(vars: list):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                if e.__class__ == KeyError:
-                    # 获取当前的traceback对象
-                    tb = sys.exc_info()[2]
-                    # 获取堆栈跟踪条目
-                    tblist = traceback.extract_tb(tb)
-                    # 获取引发错误的起始原因
-                    initial_reason = tblist[-1].line
-                    logger.warning(f'解析出现错误，服务器可能未返回正确信息 {initial_reason}')
-
-                    # debug使用，以获取出现错误的具体原因
-                    tb_list = traceback.format_tb(tb)
-                    print("".join(tb_list))
-
-                    for var in vars:
-                        if str(var) in initial_reason:
-                            logger.warning(f'相关变量: {var}')
-
-                else:
-                    logger.error(f'其他错误 {sys.exc_info()}')
-                    tb = sys.exc_info()[2]
-                    tb_list = traceback.format_tb(tb)
-                    print("".join(tb_list))
+                logger.error(f'错误 {sys.exc_info()}')
+                tb = sys.exc_info()[2]
+                tb_list = traceback.format_tb(tb)
+                print("".join(tb_list))
         return inner_wrapper
     return wrapper
 
 
-@connection_handler(['total_show', 'total_hide'])
+@connection_handler()
 def analyse_bookmarks(rest_flag=2, limit=100) -> list:
     '''
     # 解析收藏接口
@@ -296,7 +278,7 @@ def analyse_bookmarks(rest_flag=2, limit=100) -> list:
     return urls
 
 
-@connection_handler(['idata'])
+@connection_handler()
 def analyse_illusts_i(url) -> list:
     '''
     解析所有插画的信息
@@ -439,11 +421,13 @@ def writeraw_to_db_i(illdata) -> list:
                                 ''')
             status = ['2']
     return status
-def writeraw_to_db_m(th_count):
-    '''
-    将所有tag提交至数据库
-    - 需要`illdata`
-    '''
+def writeraw_to_db_m(th_count, illdata):
+    """将所有tag提交至数据库
+
+    Args:
+        th_count (int): 线程数
+        illdata (list): 插画详细信息
+    """
     all_th = []
     result = []
     logger.info(f'创建线程池，线程数量: {th_count}')
@@ -477,8 +461,8 @@ def write_tags_to_db_i(tag) -> list:
     except sqlite3.IntegrityError as e:
         # logger.debug(f'出现重复tag: {e}', exc_info = True)
         status = ['1']
-    except sqlite3.OperationalError:
-        logger.error(f'SQLite操作错误，重试: {sys.exc_info()}')
+    except Exception:
+        logger.error(f'数据库操作错误，重试: {sys.exc_info()}')
         status = write_tags_to_db_i(tag)
     con.close()
     return status
@@ -492,14 +476,10 @@ def write_tags_to_db_m(th_count):
         all_th = []
         result = []
 
-        con = sqlite3.connect(SQLPATH)
-        cur = con.cursor()
-
-        cur.execute('''
+        res = dbexecute('''
                 SELECT * FROM illusts WHERE is_translated = 0
-                ''')
-        res = cur.fetchall()    # 数据结构: [(行1), (行2), ...], 每行: (值1, ...)
-        con.close()
+                ''')    # 数据结构: [(行1), (行2), ...], 每行: (值1, ...)
+
         for r in res:
             il_tag = eval(r[1])  # 单双引号问题, 不能用json.loads()
             tags.extend(il_tag)
@@ -530,14 +510,15 @@ def notify_formatter(step=0.02):
         nflag[progress] = False
     return nflag
 nflag = notify_formatter()
-@connection_handler(['connection_handler_trigger'])
-def fetch_translated_tag_i(j, tot, priority=None) -> dict:
+@connection_handler()
+def fetch_translated_tag_i(j, tot, priority=None):
     '''
-    发送请求获取翻译后的tag
+    发送请求获取翻译后的tag \n
+    最终将返回值写入.temp/result文件 \n
+    返回值为 `dict : {'原tag': '翻译后的tag'}` \n
     - `j`: tag的名称
     - `tot`: tags总数
     - `priority`: 语言优先级
-    - `:return` dict : {'原tag': '翻译后的tag'}
     '''
     global i_count
     priority = ['zh', 'en', 'zh_tw']
@@ -552,16 +533,16 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
     def get():
         try:
             driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
-        except Exception as e:
+            for cok in cookie:
+                driver.add_cookie(cok)
+            driver.refresh()
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located)
+        except Exception:
             logger.error(f'请求tag接口时出错,重试 {sys.exc_info()}')
             get()
     get()
-    for cok in cookie:
-        driver.add_cookie(cok)
-    driver.refresh()
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_all_elements_located)
-
+    
     resp: dict = json.loads(
         driver.find_element(
             By.CSS_SELECTOR, 'body > pre'
@@ -578,15 +559,15 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
             f.close()
         logger.info('失败的tag已写入日志')
     else:
-        connection_handler_trigger = resp['body']['tagTranslation']
+        tagTranslation = resp['body']['tagTranslation']
         transtag = ''
-        if connection_handler_trigger == []:
-            # print(connection_handler_trigger)
+        if tagTranslation == []:
+            # print(tagTranslation)
             logger.info(f'无tag {j} 的翻译')
             # result = {j: 'None'}
             result = {j: j}
         else:
-            trans: dict = connection_handler_trigger[j]  # 包含所有翻译语言的dict
+            trans: dict = tagTranslation[j]  # 包含所有翻译语言的dict
             lans = trans.keys()
             for l in priority:
                 if l in lans and trans[l] != '':
@@ -606,24 +587,29 @@ def fetch_translated_tag_i(j, tot, priority=None) -> dict:
                 result = {j: transtag}
 
     i_count+=1
-
     for i in nflag:
         if i_count / tot > i and nflag[i] == False:
-            logger.info(f'fetch_translated_tag 当前进度(近似值): {i}')
+            logger.info(f'fetch_translated_tag 当前进度(近似值): {i.__round__(5)}')
             nflag[i] = True
-    return result
+    # 写入文件
+    if result != None:
+        with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
+            f.write(str(result) + '\n')
+            f.close()
+    
+    # return result
 def fetch_translated_tag_m(th_count) -> list:
     jptags = []
     result = []
 
-    con = sqlite3.connect(SQLPATH)
-    cur = con.cursor()
+    # 清空上次运行的结果
+    with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
+        f.write('')
+        f.close()
     # 只找出未翻译的tag
-    cur.execute('''
+    res = dbexecute('''
                 SELECT * FROM tags WHERE transtag == ''
                 ''')
-    res = cur.fetchall()
-    cur.close()
 
     for r in res:
         (jptag, _) = r
@@ -637,14 +623,21 @@ def fetch_translated_tag_m(th_count) -> list:
             all_th.append(pool.submit(fetch_translated_tag_i, j, len(jptags)))
 
         wait(all_th, return_when=ALL_COMPLETED)
-        for th in all_th:
-            if th.result != None:
-                result.append(th.result())
+        # 读取文件
+        logger.debug('tag翻译完成，从文件中读取结果')
+        with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
+            lines = f.readlines()
+            for line in lines:
+                dic = eval(line)
+                result.append(dic)
+            f.close()
+
         s = 0
         for r in result:
             if type(r) != type(None):
-                if r.keys == r.values:  # 对应子线程相关处理方法
+                if r.keys == r.values:  # 根据子线程出现无翻译时的操作进行判断
                     s += 1
+        
         logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
     return result
 
@@ -653,29 +646,22 @@ def write_transtags_to_db_i(tran: dict):
     '''
     `tran`: 需要提交的tags (jp:tr)
     '''
-    try:
-        con = sqlite3.connect(SQLPATH)
-        cur = con.cursor()
-        if type(tran) == type(None):
-            logger.warning('参数为NoneType类型，忽略')
-        else:
-            transtag = list(tran.values())[0]
-            jptag = list(tran.keys())[0]
-        # 注意sql语句transtag用双引号！
-        # 否则执行sql时会有syntax error
-        cur.execute(
-            f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
-        con.commit()
-        con.close()
-    except Exception as e:
-        tb = traceback.format_exc()
-        logger.exception(f'捕获到异常，重试: {sys.exc_info()}')
-        logger.exception(tb)
-        write_transtags_to_db_i(tran)
-def write_transtags_to_db_m(th_count):
-    '''
-    将翻译后的tags提交至表tags
-    - 需要trans变量
+    if type(tran) == type(None):
+        logger.warning('参数为NoneType类型，忽略')
+    else:
+        transtag = list(tran.values())[0]
+        jptag = list(tran.keys())[0]
+    # 注意sql语句transtag用双引号！
+    # 否则执行sql时会有syntax error
+    dbexecute(
+        f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
+def write_transtags_to_db_m(th_count, trans):
+    """提交翻译后的tags
+
+    Args:
+        th_count (int): 线程数
+        trans (list): 包含原tag与翻译后tag字典的列表集合
+    """    '''
     '''
     all_th = []
     logger.info(f'创建线程池，线程数量: {th_count}')
@@ -689,17 +675,14 @@ def write_transtags_to_db_m(th_count):
 
 def transtag_return_i(r0):
     try:
-        con = sqlite3.connect(SQLPATH)
-        cur = con.cursor()
         if type(r0) != type(None):
             pid, jptag0, transtag0, is_translated0, is_private0 = r0
             jptags = eval(jptag0)
             l = [''] * len(jptags)
             for i in range(len(jptags)):
-                cur.execute('''
+                resp = dbexecute('''
                             SELECT * FROM tags
                             ''')
-                resp = cur.fetchall()
                 for r in resp:
                     jptag, transtag = r
                     if jptag == jptags[i]:
@@ -707,19 +690,18 @@ def transtag_return_i(r0):
             # 注意transtag用三引号！
             # 注意上文l[i]行表述
             # 这两处均是为了兼顾python和sql语法
-            cur.execute(f'''
+            dbexecute(f'''
                         UPDATE illusts SET transtag = """{l}""" WHERE pid = {pid}
                         ''')
-            cur.execute(f'''
+            dbexecute(f'''
                         UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
                         ''')
-            con.commit()
             # logger.debug(l)
         else:
             logger.warning('参数为NoneType类型，忽略')
-    except Exception as e:
+    except Exception:
         tb = traceback.format_exc()
-        logger.exception(f'捕获到错误: {tb}\n{l}\n{pid}')
+        logger.exception(f'捕获到错误，发生位置: {tb}\n{l}\n{pid}')
         transtag_return_i(r0)
 def transtag_return_m(th_count):
     '''
@@ -728,12 +710,9 @@ def transtag_return_m(th_count):
     all_th = []
     logger.info(f'创建线程池，线程数量: {th_count}')
     with ThreadPoolExecutor(max_workers=th_count) as pool:
-        con = sqlite3.connect(SQLPATH)
-        cur = con.cursor()
-        cur.execute('''
+        resp0 = dbexecute('''
                     SELECT * FROM illusts
                     ''')
-        resp0 = cur.fetchall()
         for r0 in resp0:
             all_th.append(pool.submit(transtag_return_i, r0))
 
@@ -793,7 +772,6 @@ def mapping() -> dict:
     return tag__pid
 
 
-
 if __name__ == '__main__':
     while True:
         print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-退出')
@@ -814,16 +792,23 @@ if __name__ == '__main__':
             #]
 
 
-            writeraw_to_db_m(WRITERAW_TO_DB_THREADS)
+            writeraw_to_db_m(WRITERAW_TO_DB_THREADS, illdata)
             write_tags_to_db_m(WRITE_TAGS_TO_DB_THREADS)
 
 
             trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
+            
+            logger.info('获取翻译后的tag完成，写入文件...')
+            with open(CWD + '\\temp\\result','w', encoding = 'utf-8') as f:
+                for t in trans:
+                    f.write(str(t) + '\n')
+                f.close()
+            
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
 
-            write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS)
+            write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS, trans)
 
             transtag_return_m(TRANSTAG_RETURN_THREADS)
             end = time.time()
@@ -887,4 +872,3 @@ if __name__ == '__main__':
         else:
             print('未知的指令')
         print('')
-5
