@@ -1,23 +1,28 @@
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+from difflib import get_close_matches
 import json
+import logging
+import os
+import pandas as pd
+import psutil
+import re
 from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-import logging
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
-from time import sleep
-from urllib import parse
-import sys
-import traceback
-import re
-from difflib import get_close_matches
-import time
-import psutil
 import shutil
-import os
 import sqlite3
+import sys
+import threading
+import tkinter as tk
+from tkinter import ttk
+from tkinter import scrolledtext
+from tkinter.font import Font
+import time
+import traceback
+from urllib import parse
 from win10toast import ToastNotifier
-import pandas as pd
+
 
 import decrypt
 import config
@@ -43,15 +48,55 @@ CHROME_DRIVER_PATH = CWD + r'\bin\chromedriver.exe'
 reserve_words = {'help': '_help()', 'exit': '_exit()',
                  'search': '_search()', 'list': '_list()', 'hot': '_hot()'}
 
+
 # 日志初始化
-logger = logging.getLogger('logger')
-handler = logging.StreamHandler()
+
+## GUI日志
+class TkinterLogHandler(logging.Handler):  
+    def __init__(self, text_widget):  
+        super().__init__()  
+        self.text_widget = text_widget  
+  
+    def emit(self, record):  
+        msg = self.format(record)  
+        def append():  
+            self.text_widget.config(state='normal')  
+            self.text_widget.insert(tk.END, msg + '\n')  
+            self.text_widget.yview(tk.END)  
+            self.text_widget.config(state='disabled')  
+          
+        # 确保GUI更新在主线程中执行  
+        self.text_widget.after(0, append)  
+
+logger = logging.getLogger('guilogger')  
 logger.setLevel(logging.DEBUG)
-handler.setLevel(logging.DEBUG)
+
+
+# 创建一个Tkinter窗口和文本框
+root = tk.Tk()
+font_ = Font(family="Consolas", size=8, weight="bold")
+text_widget = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=80, height=20, font=font_)
+text_widget.pack(fill=tk.BOTH, expand=True)
+text_widget.config(state='disabled')  # 禁止直接编辑
+
+  
+# 将TkinterLogHandler添加到日志器  
+handler = TkinterLogHandler(text_widget)  
 formatter = logging.Formatter(
     "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
 handler.setFormatter(formatter)
-logger.addHandler(handler)
+logger.addHandler(handler) 
+
+
+## 控制台日志
+#logger = logging.getLogger('logger')
+#handler = logging.StreamHandler()
+#logger.setLevel(logging.DEBUG)
+#handler.setLevel(logging.DEBUG)
+#formatter = logging.Formatter(
+#    "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
+#handler.setFormatter(formatter)
+#logger.addHandler(handler)
 
 # Toast初始化
 toaster = ToastNotifier()
@@ -171,19 +216,23 @@ def connection_handler():
                 return func(*args, **kwargs)
             except Exception as e:
                 logger.error(f'错误 {sys.exc_info()}')
+                print(f'错误 {sys.exc_info()}')
                 tb = sys.exc_info()[2]
                 tb_list = traceback.format_tb(tb)
-                print("".join(tb_list))
+                ex = "".join(tb_list)
+                logger.error(ex)
+                print(ex)
         return inner_wrapper
     return wrapper
 
 
 @connection_handler()
-def analyse_bookmarks(rest_flag=2, limit=100) -> list:
+def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
     '''
     # 解析收藏接口
     - 接口名称: https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=&limit=&rest=&lang=
     - `:return`: 所有需要调用的接口
+    - `cookie`: pixiv上的cookie
     - `rest_flag`: 可见设置 (= 0,1,2),分别对应show(公开),hide(不公开),show+hide [默认为2]
     - `limit`: 每次获取的pid数目 (= 1,2,3,...,100) [默认为100(最大)]
     '''
@@ -279,11 +328,12 @@ def analyse_bookmarks(rest_flag=2, limit=100) -> list:
 
 
 @connection_handler()
-def analyse_illusts_i(url) -> list:
+def analyse_illusts_i(url, cookie) -> list:
     '''
     解析所有插画的信息
     - i就是individual的意思, 子线程
-    -  `url`: 接口URL
+    - `url`: 接口URL
+    - `cookie`: pixiv上的cookie
     - `:return`: 插画信息的列表, 忽略插画数量
     '''
 
@@ -320,13 +370,14 @@ def analyse_illusts_i(url) -> list:
         else:
             illustdata.append(ildata)
 
-    sleep(0.1)
+    time.sleep(0.1)
     return illustdata, ignores
-def analyse_illusts_m(th_count, urls, recursion = 0) -> list:
+def analyse_illusts_m(th_count, urls, cookie, recursion = 0) -> list:
     '''
     analyse_illusts_i的主线程, 整合信息
     - `th_count`: 线程数量
     - `urls`: 请求url列表
+    - `cookie`: pixiv上的cookie
     - `recursion`: 判断递归次数
     '''
     illdata = []
@@ -338,7 +389,7 @@ def analyse_illusts_m(th_count, urls, recursion = 0) -> list:
     logger.info(f'创建线程池，线程数量: {th_count}')
     with ThreadPoolExecutor(max_workers=th_count) as pool:
         for u in urls:
-            all_th[u] = pool.submit(analyse_illusts_i, u)
+            all_th[u] = pool.submit(analyse_illusts_i, u, cookie)
         wait(all_th.values(), return_when=ALL_COMPLETED)
         logger.info('所有线程运行完成')
         # 获取各线程返回值
@@ -511,13 +562,14 @@ def notify_formatter(step=0.02):
     return nflag
 nflag = notify_formatter()
 @connection_handler()
-def fetch_translated_tag_i(j, tot, priority=None):
+def fetch_translated_tag_i(j, tot, cookie, priority=None):
     '''
     发送请求获取翻译后的tag \n
     最终将返回值写入.temp/result文件 \n
     返回值为 `dict : {'原tag': '翻译后的tag'}` \n
     - `j`: tag的名称
     - `tot`: tags总数
+    - `cookie`: pixiv上的cookie
     - `priority`: 语言优先级
     '''
     global i_count
@@ -598,7 +650,7 @@ def fetch_translated_tag_i(j, tot, priority=None):
             f.close()
     
     # return result
-def fetch_translated_tag_m(th_count) -> list:
+def fetch_translated_tag_m(th_count, cookie) -> list:
     jptags = []
     result = []
 
@@ -620,7 +672,7 @@ def fetch_translated_tag_m(th_count) -> list:
     with ThreadPoolExecutor(max_workers=th_count) as pool:
         all_th = []
         for j in jptags:
-            all_th.append(pool.submit(fetch_translated_tag_i, j, len(jptags)))
+            all_th.append(pool.submit(fetch_translated_tag_i, j, len(jptags), cookie))
 
         wait(all_th, return_when=ALL_COMPLETED)
         # 读取文件
@@ -772,19 +824,19 @@ def mapping() -> dict:
     return tag__pid
 
 
-if __name__ == '__main__':
+def main():
     while True:
         print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-退出')
         mode = int(input('模式 = '))
         if mode == 1:
             start = time.time()
             cookie = get_cookies(rtime=COOKIE_EXPIRED_TIME)
-            URLs = analyse_bookmarks()
+            # URLs = analyse_bookmarks(cookie=cookie)
             # debug:
-            # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
+            URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
-            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs)
+            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs, cookie)
             # debug:
             #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
             #{'id': '117717637', 'title': 'おしごと終わりにハグしてくれる天使', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 4, 'url': 'https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2024/04/10/17/30/02/117717637_p0_custom1200.jpg', 'description': '', 'tags': ['オリジナル', '女の子', '緑髪', '天使', 'ハグ', '巨乳', 'ぱんつ', 'オリジナル1000users入り'], 'userId': '29164302', 'userName': '緑風マルト🌿', 'width': 1296, 'height': 1812, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25109862018', 'private': False}, 'alt': '#オリジナル おしごと終わりにハグしてくれる天使 - 緑風マルト🌿的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2024-04-10T17:30:02+09:00', 'updateDate': '2024-04-10T17:30:02+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 1, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2024/01/25/15/56/10/25434619_c70d86172914664ea2b15cec94bc0afd_50.png'},
@@ -796,7 +848,7 @@ if __name__ == '__main__':
             write_tags_to_db_m(WRITE_TAGS_TO_DB_THREADS)
 
 
-            trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
+            trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS, cookie)
             
             logger.info('获取翻译后的tag完成，写入文件...')
             with open(CWD + '\\temp\\result','w', encoding = 'utf-8') as f:
@@ -872,3 +924,17 @@ if __name__ == '__main__':
         else:
             print('未知的指令')
         print('')
+def start_logging():  
+    # 清除之前的日志（可选）  
+    text_widget.delete(1.0, tk.END)  
+    # 开始记录日志  
+    def run_main():     #将main函数作为线程运行
+        th = threading.Thread(target=main)
+        th.start()
+    root.after(1000, run_main)  
+
+button = ttk.Button(root, text="记录日志并运行主程序", command=start_logging)  
+button.pack(pady=20)
+
+if __name__ == "__main__":
+    root.mainloop()
