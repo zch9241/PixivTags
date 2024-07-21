@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+import datetime
 from difflib import get_close_matches
 import json
 import logging
@@ -49,8 +50,15 @@ reserve_words = {'help': '_help()', 'exit': '_exit()',
                  'search': '_search()', 'list': '_list()', 'hot': '_hot()'}
 
 
-# 日志初始化
+# GUI初始化
+root = tk.Tk()
+font_ = Font(family="Consolas", size=8, weight="bold")
+text_widget = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=120, height=30, font=font_)
+text_widget.pack(fill=tk.BOTH, expand=True)
+text_widget.config(state='disabled')  # 禁止直接编辑
 
+
+# 日志初始化
 ## GUI日志
 class TkinterLogHandler(logging.Handler):  
     def __init__(self, text_widget):  
@@ -71,15 +79,6 @@ class TkinterLogHandler(logging.Handler):
 logger = logging.getLogger('guilogger')  
 logger.setLevel(logging.DEBUG)
 
-
-# 创建一个Tkinter窗口和文本框
-root = tk.Tk()
-font_ = Font(family="Consolas", size=8, weight="bold")
-text_widget = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=80, height=20, font=font_)
-text_widget.pack(fill=tk.BOTH, expand=True)
-text_widget.config(state='disabled')  # 禁止直接编辑
-
-  
 # 将TkinterLogHandler添加到日志器  
 handler = TkinterLogHandler(text_widget)  
 formatter = logging.Formatter(
@@ -645,19 +644,29 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
             nflag[i] = True
     # 写入文件
     if result != None:
-        with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
-            f.write(str(result) + '\n')
-            f.close()
+        def writefile():
+            # 通过递归防止写入失败
+            try:
+                with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
+                    f.write(str(result) + '\n')
+                    f.close()
+            except Exception:
+                logger.error(f'错误 {sys.exc_info()}')
+                print(f'错误 {sys.exc_info()}')
+                tb = sys.exc_info()[2]
+                tb_list = traceback.format_tb(tb)
+                ex = "".join(tb_list)
+                logger.error(ex)
+                print(ex)
+                logger.info('重试写入...')
+                writefile()
+        writefile()
     
     # return result
 def fetch_translated_tag_m(th_count, cookie) -> list:
     jptags = []
     result = []
 
-    # 清空上次运行的结果
-    with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
-        f.write('')
-        f.close()
     # 只找出未翻译的tag
     res = dbexecute('''
                 SELECT * FROM tags WHERE transtag == ''
@@ -826,14 +835,28 @@ def mapping() -> dict:
 
 def main():
     while True:
-        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-退出')
-        mode = int(input('模式 = '))
-        if mode == 1:
+        # 备份并清空上次运行的结果(若有)
+        with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
+            lines = f.readlines()
+            f.close()
+        if lines != []:
+            logger.info('备份上次运行时fetch_translated_tag_i函数的返回值')
+            timestamp = os.path.getmtime(CWD + '\\temp\\result').__round__(0)
+            SrcModifyTime = datetime.datetime.fromtimestamp(timestamp)
+            shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
+
+            with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
+                f.write('')
+                f.close()
+
+        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-同步fetch_translated_tag_i函数获取的有效数据  4-退出')
+        mode = input('模式 = ')
+        if mode == '1':
             start = time.time()
             cookie = get_cookies(rtime=COOKIE_EXPIRED_TIME)
-            # URLs = analyse_bookmarks(cookie=cookie)
+            URLs = analyse_bookmarks(cookie=cookie)
             # debug:
-            URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
+            # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
             illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs, cookie)
@@ -850,12 +873,6 @@ def main():
 
             trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS, cookie)
             
-            logger.info('获取翻译后的tag完成，写入文件...')
-            with open(CWD + '\\temp\\result','w', encoding = 'utf-8') as f:
-                for t in trans:
-                    f.write(str(t) + '\n')
-                f.close()
-            
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
@@ -866,7 +883,7 @@ def main():
             end = time.time()
             toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
             logger.info(f'总耗时: {end-start} 秒')
-        elif mode == 2:
+        elif mode == '2':
             map_result = mapping()
             df = pd.DataFrame(map_result)
             logger.info('数据操作全部完成')
@@ -880,7 +897,7 @@ def main():
             `exit`: 退出主程序
             `search`: 搜索tags
             `list`: 列出所有tags(危险操作)
-            `hot`: 列出出现最多的10个tags
+            `hot`: 列出出现最多的tags
                     ''')
             def _search():
                 key = ''
@@ -895,10 +912,10 @@ def main():
                         target_key = input('请选择其中一个结果: ')
                         while not target_key in target_keys:
                             print('未匹配, 请重新选择: ')
-                        print(f'pids: {map_result[target_key]}')
+                        print(f'pids: {list(df[target_key].dropna().astype(int))}')
                     else:
                         target_key = target_keys[0]
-                        print(f'pids: {map_result[target_key]}')
+                        print(f'pids: {list(df[target_key].dropna().astype(int))}')
             def _exit():
                 logger.info('程序执行完成')
                 exit()
@@ -918,7 +935,28 @@ def main():
                 else:
                     print('未知的指令')
                 print('')
-        elif mode == 3:
+        elif mode == '3':
+            # 此段代码参考fetch_translated_tag_m函数
+            result = []
+            with open(CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'), 'r', encoding = 'utf-8') as f:
+                lines = f.readlines()
+                for line in lines:
+                    dic = eval(line)
+                    result.append(dic)
+                f.close()
+            s = 0
+            for r in result:
+                if type(r) != type(None):
+                    if r.keys == r.values:
+                        s += 1
+            logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
+            write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS, result)
+
+            transtag_return_m(TRANSTAG_RETURN_THREADS)
+            end = time.time()
+            toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
+            
+        elif mode == '4':
             logger.info('程序退出')
             break
         else:
