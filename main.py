@@ -737,7 +737,7 @@ def write_transtags_to_db_m(th_count, trans):
 def transtag_return_i(r0):
     try:
         if type(r0) != type(None):
-            pid, jptag0, transtag0, is_translated0, is_private0 = r0
+            pid, jptag0 = r0[0], r0[1]
             jptags = eval(jptag0)
             l = [''] * len(jptags)
             for i in range(len(jptags)):
@@ -786,27 +786,23 @@ def mapping() -> dict:
     将illust表中存储的数据转换为tag对pid的映射
     '''
     logger.info('开始构建tag对pid的映射')
-
-    con = sqlite3.connect(SQLPATH)
-    cur = con.cursor()
-    cur.execute('SELECT pid,transtag FROM illusts')
-    res = cur.fetchall()
-    con.close()
+    res = dbexecute('SELECT pid,jptag,transtag FROM illusts')
 
     pid__tag = []   # pid对应的tag
     tag__pid = {}   # tag对应的pid
 
-    def formater(pid, string: str) -> dict:
+    def formatter(pid, string: str) -> dict:
         '''
-        将数据库中的数据格式化
+        将数据库中的transtag值格式化
         '''
         s = string.strip('"').replace('\\', '').replace('\"', '"').strip()
         matches = re.findall(r'"([^"]+?)"', s)
         return {pid: matches}
     for r in res:
-        pid__tag.append(formater(r[0], r[1]))
+        pid__tag.append({r[0]: eval(r[1])})
+        pid__tag.append(formatter(r[0], r[2]))
 
-    logger.info(f'从数据库获取的数据解析完成，共有 {len(pid__tag)} 个pid')
+    logger.info(f'从数据库获取的数据解析完成，共有 {len(pid__tag) // 2} 个pid')
 
     for p in pid__tag:
         for key, value_list in p.items():
@@ -892,30 +888,70 @@ def main():
             # 交互模式相关函数
             def _help():
                 print('''
-            这是交互模式的使用说明
-            `help`: 显示帮助
-            `exit`: 退出主程序
-            `search`: 搜索tags
-            `list`: 列出所有tags(危险操作)
-            `hot`: 列出出现最多的tags
+这是交互模式的使用说明
+`help`: 显示帮助
+`exit`: 退出主程序
+`search`: 搜索tags
+`list`: 列出所有tags(危险操作)
+`hot`: 列出出现最多的tags
                     ''')
             def _search():
                 key = ''
                 while key == '':
-                    print('输入关键词以进行查询:')
-                    key = input()
+                    print('参数: -f 强制搜索 -c 多关键词搜索')
+                    print('输入关键词以进行查询（只支持单个参数）:')
+                    cmd_key = input()
 
                     keys = list(map_result.keys())
-                    target_keys = get_close_matches(key, keys, n=8, cutoff=0.1)
-                    if len(target_keys) > 1:
+                    if len(cmd_key.split(' ')) == 1:
+                        key = cmd_key
+                        target_keys = get_close_matches(key, keys, n=3, cutoff=0.5)
+                        
                         print(f'可能的结果: {target_keys}')
                         target_key = input('请选择其中一个结果: ')
-                        while not target_key in target_keys:
+                        if not target_key in target_keys:
                             print('未匹配, 请重新选择: ')
-                        print(f'pids: {list(df[target_key].dropna().astype(int))}')
+                            key = ''
+                            continue
+                        else:
+                            print(f'pids: {set(list(df[target_key].dropna().astype(int).sort_values(ascending = False)))}')
+                    elif cmd_key.split(' ')[0] == '-f':
+                        key = cmd_key.split(' ')[-1]
+                        try:
+                            print(f'pids: {set(list(df[key].dropna().astype(int).sort_values(ascending = False)))}')
+                        except Exception:
+                            print('出现错误')
+                            print(sys.exc_info())
+                    elif cmd_key.split(' ')[0] == '-c':
+                        plist = []      # 存放每次查询返回的结果集合
+                        intersection = []   # 取得的交集
+                        
+                        keylist = cmd_key.split(' ')[1:]
+                        
+                        s = 1
+                        l = len(keylist)
+                        for k in keylist:
+                            while True:
+                                print(f'正在查询的key为第 {s} 个, 共 {l} 个')
+                                target_keys = get_close_matches(k, keys, n=3, cutoff=0.5)
+                                
+                                print(f'可能的结果: {target_keys}')
+                                target_key = input('请选择其中一个结果: ')
+                                if not target_key in target_keys:
+                                    print('未匹配, 请重新选择: ')
+                                    continue
+                                else:
+                                    plist.extend(set(list(df[target_key].dropna().astype(int))))
+                                    s += 1
+                                    break
+                        for p in set(plist):
+                            num = plist.count(p)
+                            if num == l:
+                                intersection.append(p)
+                        print(f'pids: {sorted(intersection)}') 
+                        key = 'done'
                     else:
-                        target_key = target_keys[0]
-                        print(f'pids: {list(df[target_key].dropna().astype(int))}')
+                        print(f"未知的参数: {cmd_key.split(' ')[0]}")
             def _exit():
                 logger.info('程序执行完成')
                 exit()
@@ -955,7 +991,6 @@ def main():
             transtag_return_m(TRANSTAG_RETURN_THREADS)
             end = time.time()
             toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
-            
         elif mode == '4':
             logger.info('程序退出')
             break
@@ -971,7 +1006,7 @@ def start_logging():
         th.start()
     root.after(1000, run_main)  
 
-button = ttk.Button(root, text="记录日志并运行主程序", command=start_logging)  
+button = ttk.Button(root, text="运行主程序", command=start_logging)  
 button.pack(pady=20)
 
 if __name__ == "__main__":
