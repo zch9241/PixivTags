@@ -1,3 +1,17 @@
+# PIXIVTAGS Version 1.0
+# 
+# 
+# COPYRIGHT NOTICE  
+# 
+# Copyright (c) 2024, zch9241. All rights reserved.  
+# 
+# This source code is provided "AS IS" without any warranty of any kind.  
+# You may use this source code for any purpose, provided that you do not violate any applicable laws or regulations. However, you are not authorized to distribute, modify, or sublicense this source code without the express written permission of the copyright owner.  
+#  
+# If you have any questions or need further clarification, please contact:  
+# [zch2426936965@gmail.com]
+# 
+
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 import datetime
 from difflib import get_close_matches
