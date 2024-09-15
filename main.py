@@ -12,19 +12,14 @@
 # [zch2426936965@gmail.com]
 # 
 
+# standard-libs
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 import datetime
 from difflib import get_close_matches
 import json
 import logging
 import os
-import pandas as pd
-import psutil
 import re
-from selenium import webdriver
-from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
 import shutil
 import sqlite3
 import sys
@@ -36,6 +31,14 @@ from tkinter.font import Font
 import time
 import traceback
 from urllib import parse
+
+# site-packages
+import pandas as pd
+import psutil
+from selenium import webdriver
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
 from win10toast import ToastNotifier
 
 
@@ -59,10 +62,17 @@ COOKIE_PATH = CWD + r'\src\Cookies'
 TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
 CHROME_DRIVER_PATH = CWD + r'\bin\chromedriver.exe' 
 
-# 交互模式的保留字
+# 交互模式
 reserve_words = {'help': '_help()', 'exit': '_exit()',
                  'search': '_search()', 'list': '_list()', 'hot': '_hot()'}
-
+help_text = """
+这是交互模式的使用说明
+`help`: 显示帮助
+`exit`: 退出主程序
+`search`: 搜索tags
+`list`: 列出所有tags(危险操作)
+`hot`: 列出出现最多的tags
+"""
 
 # GUI初始化
 root = tk.Tk()
@@ -212,6 +222,12 @@ def dbexecute(sql):
         return res
     except Exception:
         logger.error(f'数据库操作错误，重试 {sys.exc_info()}')
+        try:
+            cur.close()
+            con.close()
+        except Exception:
+            pass
+        time.sleep(1)
         res = dbexecute(sql)
         return res
 
@@ -901,18 +917,12 @@ def main():
             
             # 交互模式相关函数
             def _help():
-                print('''
-这是交互模式的使用说明
-`help`: 显示帮助
-`exit`: 退出主程序
-`search`: 搜索tags
-`list`: 列出所有tags(危险操作)
-`hot`: 列出出现最多的tags
-                    ''')
+                print(help_text)
             def _search():
                 key = ''
                 while key == '':
-                    print('参数: -f 强制搜索 -c 多关键词搜索')
+                    print('参数: -f 强制搜索此tag [-f tag]')
+                    print('参数: -c 多tag搜索 [-c tag0 tag1 tag2]')
                     print('输入关键词以进行查询（只支持单个参数）:')
                     cmd_key = input()
 
@@ -984,7 +994,8 @@ def main():
                     eval(reserve_words[search])
                 else:
                     print('未知的指令')
-                print('')
+                    _help()
+                print('\n')
         elif mode == '3':
             # 此段代码参考fetch_translated_tag_m函数
             result = []
