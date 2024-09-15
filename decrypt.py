@@ -1,14 +1,14 @@
 # -*- coding=utf-8 -*-
 # 原作者：https://blog.csdn.net/jyttttttt/article/details/134972038
-import shutil
 import os
 import sqlite3
 import json
 import base64
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import ctypes
 from ctypes import wintypes
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 cwd = os.getcwd()
