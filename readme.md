@@ -27,7 +27,7 @@
    UID: str = '71963925'                    # 你的pixiv UID
    COOKIE_EXPIRED_TIME = 43200              # 重新获取cookie的时间间隔
 2. 本项目使用`decrypt.py`将`Google Chrome`中的cookie解密并获取域与pixiv有关的cookie，所以请提前使用上述浏览器登录pixiv
-3. 本项目使用`selenium`实现浏览器自动化，请[下载](https://developer.chrome.com/docs/chromedriver/downloads)与Chrome版本相同的`chromedriver`(需要魔法)
+3. 本项目使用`selenium`实现浏览器自动化，请[下载](shttps://developer.chrome.com/docs/chromedriver/downloads/version-selection)与Chrome版本相同的`chromedriver`(需要魔法)
 ## 版权  
   
 © 2024 zch9241. All rights reserved.  

@@ -1,5 +1,8 @@
 # -*- coding=utf-8 -*-
-# 原作者：https://blog.csdn.net/jyttttttt/article/details/134972038
+# 参考：https://blog.csdn.net/jyttttttt/article/details/134972038
+# 已弃用
+# 
+
 import os
 import sqlite3
 import json
@@ -88,6 +91,8 @@ def chrome_decrypt(encrypted_txt):
     elif encrypted_txt[:3] == b'v10':
         decrypted_txt = aes_decrypt(encrypted_txt)
         return decrypted_txt[:-16].decode()
+    else:
+        print(f'未知的加密方式: {encrypted_txt}')
 
 
 def query_cookie(host):
@@ -114,16 +119,16 @@ def query_logindata(url):
 
 if __name__ == '__main__':
     print("Decrypt Cookies:")
-    cookies = query_cookie("") # 可以传入参数筛选指定host_key
+    cookies = query_cookie(".pixiv.net") # 可以传入参数筛选指定host_key
     for data in cookies:
         cok = data[0], data[1], chrome_decrypt(data[2])
         print(cok)
 
-    print()
-    print("Decrypt Login Data:")
-    logindata = query_logindata("") # 可以传入参数筛选指定url
-    for data in logindata:
-        login = data[0], data[1], chrome_decrypt(data[2])
-        print(login)
+    # print()
+    # print("Decrypt Login Data:")
+    # logindata = query_logindata("") # 可以传入参数筛选指定url
+    # for data in logindata:
+    #     login = data[0], data[1], chrome_decrypt(data[2])
+    #     print(login)
 
 
