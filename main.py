@@ -341,6 +341,8 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
             options.add_argument('--log-level=3')
             options.add_argument('--disable-gpu')
             options.add_argument('--headless')
+            # 对chrome 129版本无头模式白屏的临时解决办法 (https://stackoverflow.com/questions/78996364/chrome-129-headless-shows-blank-window)
+            options.add_argument("--window-position=-2400,-2400")
             service = Service(executable_path = CHROME_DRIVER_PATH)
             driver = webdriver.Chrome(options=options, service=service)
 
@@ -379,7 +381,7 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
                 ).text
             )
             total_hide = resp['body']['total']
-            driver.close()
+            driver.quit()
 
             logger.info(f'解析total字段完成, show数量: {total_show}, hide数量: {total_hide}')
 
@@ -443,6 +445,7 @@ def analyse_illusts_i(url, cookie) -> list:
     options.add_argument('--log-level=3')
     options.add_argument('--disable-gpu')
     options.add_argument('--headless')
+    options.add_argument("--window-position=-2400,-2400")
     service = Service(executable_path = CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(options=options, service=service)
 
@@ -461,7 +464,7 @@ def analyse_illusts_i(url, cookie) -> list:
             By.CSS_SELECTOR, 'body > pre'
         ).text
     )
-    driver.close()
+    driver.quit()
     idata = resp['body']['works']
     for ildata in idata:
         if ildata['isMasked'] == True:
@@ -720,6 +723,7 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
     options.add_argument('--log-level=3')
     options.add_argument('--disable-gpu')
     options.add_argument('--headless')
+    options.add_argument("--window-position=-2400,-2400")
     service = Service(executable_path = CHROME_DRIVER_PATH)
     driver = webdriver.Chrome(options=options, service=service)
     def get():
@@ -741,7 +745,7 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
         ).text
     )
     
-    driver.close()
+    driver.quit()
     if type(resp) == type(None):
         logger.warning(f'服务器返回值不正确 此次请求tag: {j}')
         with open(TAG_LOG_PATH, 'a') as f:
@@ -965,14 +969,21 @@ def mapping() -> dict:
 
     def formatter(pid, string: str) -> dict:
         '''
-        将数据库中的transtag值格式化
+        将数据库中的transtag值格式化 \n
+        已弃用
         '''
         s = string.strip('"').replace('\\', '').replace('\"', '"').strip()
         matches = re.findall(r'"([^"]+?)"', s)
         return {pid: matches}
     for r in res:
+        transtag_base64 = eval(r[2])
+        transtag = []
+        for tag_base64 in transtag_base64:
+            tag = base64.b64decode(tag_base64).decode('utf-8')
+            transtag.append(tag)
+        
         pid__tag.append({r[0]: eval(r[1])})
-        pid__tag.append(formatter(r[0], base64.b64decode(r[2]).decode('utf-8')))
+        pid__tag.append({r[0]: transtag})
 
     logger.info(f'从数据库获取的数据解析完成，共有 {len(pid__tag) // 2} 个pid')
 
