@@ -6,7 +6,7 @@ import os
 
 def decrypt():
     """
-    通过制定本地user data文件夹以获取对应网站的cookie \n
+    通过指定本地user data文件夹以获取对应网站的cookie \n
     这种方式应该是最稳妥的 \n
     - returns (list): 包含cookie的列表
     """
@@ -25,5 +25,5 @@ def decrypt():
 
     driver.get('https://www.pixiv.net')
     cookies = driver.get_cookies()
-    driver.close()
+    driver.quit()
     return cookies
