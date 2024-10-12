@@ -44,11 +44,12 @@ from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from win10toast import ToastNotifier
+import yaml
 
 
 import decrypt
 import decrypt_by_selenium
-import config
+from src import config
 
 
 # 常量初始化
@@ -63,7 +64,7 @@ COOKIE_EXPIRED_TIME = config.COOKIE_EXPIRED_TIME
 
 CWD = os.getcwd()
 SQLPATH = CWD + r'\src\illdata.db'
-COOKIE_PATH = CWD + r'\src\cookies.py'
+COOKIE_PATH = CWD + r'\src\cookies.yaml'
 TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
 CHROME_DRIVER_PATH = CWD + r'\bin\chromedriver.exe' 
 
@@ -222,11 +223,21 @@ def get_cookies_by_selenium(rtime: int) -> list:
     """
     global update_cookies
     cookie = []
-
+    
+    
     # 判断是否需要更新cookies
-    mod_time = os.path.getmtime(COOKIE_PATH)
-    relative_time = time.time() - mod_time
-    if relative_time < rtime:
+    with open(COOKIE_PATH, 'r') as f:
+        configs = f.read()
+        if configs != '':
+            config_dict = yaml.load(configs, yaml.Loader)
+            modify_time = config_dict['ModifyTime']
+            relative_time = time.time() - modify_time
+        else:
+            # 未配置cookie时，即第一次运行
+            relative_time = -1
+        f.close()
+    
+    if relative_time < rtime and relative_time > 0:
         update_cookies = False
         logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
     else:
@@ -259,16 +270,21 @@ def get_cookies_by_selenium(rtime: int) -> list:
         logger.info('正在解密cookies')
         
         cookies = decrypt_by_selenium.decrypt()
+        configs = yaml.dump(
+            {'ModifyTime': time.time(), 'Cookies': [cookies]})
+
         with open(COOKIE_PATH, 'w') as f:
-            f.writelines(str(cookies))
+            f.write(configs)
             f.close()
         
         logger.info(f'解密完成，数量 {len(cookies)}')
     with open(COOKIE_PATH, 'r') as f:
-        cookies = f.readlines()[0]
+        configs = f.read()
+        config_dict = yaml.load(configs, yaml.Loader)
+        cookies = config_dict['Cookies'][0]
         f.close()
 
-    return eval(cookies)
+    return cookies
 
 # 数据库相关操作
 def dbexecute(sql):
@@ -298,18 +314,18 @@ def dbexecute(sql):
 # 获取pixiv上的tags并翻译
 class ValCheckError(Exception):  
     def __init__(self):  
-        super().__init__('参数校验错误')
+        super().__init__('参数校验错误: 上个函数在执行中出现错误')
 
 def var_check(*args):
     '''
-    # 检查传入参数是否合法
+    # 检查上个函数执行是否正常
     '''
     for var in args:
         if str(var)[:5] == 'ERROR':
             position = str(var).split(' ')[1]
-            logger.error(f'传入参数错误，将跳过该函数执行 所在函数:{position}')
+            logger.error(f'上个函数在执行中出现错误 所在函数:{position}')
             return True
-        
+
 
 def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
     '''
