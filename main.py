@@ -267,7 +267,7 @@ def get_cookies_by_selenium(rtime: int) -> list:
 
         logger.info('更新cookie文件')
         # 解密cookies
-        logger.info('正在解密cookies')
+        logger.info('正在获取cookies')
         
         cookies = decrypt_by_selenium.decrypt()
         configs = yaml.dump(
@@ -301,11 +301,10 @@ def dbexecute(sql):
         con.close()
     except Exception:
         logger.error(f'数据库操作错误，重试 {sys.exc_info()}')
-        try:
-            cur.close()
-            con.close()
-        except Exception:
-            pass
+        
+        cur.close()
+        con.close()
+
         time.sleep(1)
         res = dbexecute(sql)
     return res
@@ -599,7 +598,7 @@ def writeraw_to_db_i(illdata) -> list:
                                 ''')
 
             elif data_to_modify[i] == 1 and i == 4:
-                # logger.debug('更新is_privated数据')
+                # logger.debug('更新is_private数据')
                 dbexecute(f'''
                                 UPDATE illusts SET {var[4][0]} = {var[4][1]} where pid = {pid}
                                 ''')
@@ -752,6 +751,7 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
                 EC.presence_of_all_elements_located)
         except Exception:
             logger.error(f'请求tag接口时出错,重试 {sys.exc_info()}')
+            time.sleep(1)
             get()
     get()
     
@@ -920,7 +920,7 @@ def write_transtags_to_db_m(th_count, trans):
         logger.error(ex)
         print(ex)
 
-
+# 有概率出现数据库锁定错误，未解决
 def transtag_return_i(r0):
     if type(r0) != type(None):
         pid, jptag0 = r0[0], r0[1]
