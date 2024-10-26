@@ -287,27 +287,26 @@ def get_cookies_by_selenium(rtime: int) -> list:
     return cookies
 
 # 数据库相关操作
-def dbexecute(sql):
-    '''
-    通用的数据库操作函数
-    '''
-    try:
-        con = sqlite3.connect(SQLPATH)
-        cur = con.cursor()
-        cur.execute(sql)
-        con.commit()
-        res = cur.fetchall()
-        cur.close()
-        con.close()
-    except Exception:
-        logger.error(f'数据库操作错误，重试 {sys.exc_info()}')
-        
-        cur.close()
-        con.close()
-
-        time.sleep(1)
-        res = dbexecute(sql)
-    return res
+db_lock = threading.Lock()
+def dbexecute(query, params=None):  
+    res = ''
+    with db_lock:  # 确保只有一个线程可以执行这个块  
+        conn = sqlite3.connect(SQLPATH)  
+        cursor = conn.cursor()  
+        try:  
+            cursor.execute(query, params or ())  
+            conn.commit()  
+            res = cursor.fetchall()
+        except sqlite3.Error as e:  
+            print(f"Database error: {e}")  
+            conn.rollback()  
+        finally:  
+            cursor.close()  
+            conn.close()  
+    if res != '':
+        return res
+    else:
+        return None
 
 
 # 获取pixiv上的tags并翻译
@@ -920,7 +919,7 @@ def write_transtags_to_db_m(th_count, trans):
         logger.error(ex)
         print(ex)
 
-# 有概率出现数据库锁定错误，未解决
+
 def transtag_return_i(r0):
     if type(r0) != type(None):
         pid, jptag0 = r0[0], r0[1]
