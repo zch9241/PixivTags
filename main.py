@@ -288,13 +288,28 @@ def get_cookies_by_selenium(rtime: int) -> list:
 
 # 数据库相关操作
 db_lock = threading.Lock()
-def dbexecute(query, params=None):  
+def dbexecute(query, params=None, many=False):  
+    """数据库操作
+
+    Args:
+        query (str): sql命令
+        params (tuple|list, optional): 查询参数. Defaults to None.
+        many (bool, optional): 是否对多行数据进行操作. Defaults to False.
+
+    Returns:
+        list|None: 查询结果（若有）
+    """
     res = ''
     with db_lock:  # 确保只有一个线程可以执行这个块  
         conn = sqlite3.connect(SQLPATH)  
         cursor = conn.cursor()  
-        try:  
-            cursor.execute(query, params or ())  
+        try:
+            if many==True and type(params) == list:
+                cursor.executemany(query, params or ())
+            elif type(params) == tuple or params == None:
+                cursor.execute(query, params or ()) 
+            else:
+                 raise Exception("传入的params类型校验错误")
             conn.commit()  
             res = cursor.fetchall()
         except sqlite3.Error as e:  
@@ -449,7 +464,7 @@ def analyse_illusts_i(url, cookie) -> list:
     - i就是individual的意思, 子线程
     - `url`: 接口URL
     - `cookie`: pixiv上的cookie
-    - `:return`: 插画信息的列表, 忽略插画数量
+    - `:return`: 插画信息的列表, 忽略的插画数量
     '''
 
     illustdata = []
@@ -557,54 +572,46 @@ def writeraw_to_db_i(illdata) -> list:
     jptag = str(illdata['tags'])
     transtag = '0'
     is_translated = 0
-    is_private_b = illdata['bookmarkData']['private']
-    if is_private_b == False:
-        is_private = 0
-    elif is_private_b == True:
-        is_private = 1
-
-    newdata = (pid, jptag, transtag, is_translated, is_private)
-    data_to_modify = [0, 0, 0, 0, 0]
-    var = {0: ['pid', pid], 1: ['jptag', jptag], 2: ['transtag', transtag],
-           3: ['is_translated', is_translated], 4: ['is_private', is_private]}
+    is_private = illdata['bookmarkData']['private']
 
     # 先查询已有信息，再判断是否需要修改
     sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
-    olddata: list = dbexecute(sql)
+    query_result: list = dbexecute(sql)
     # 比较信息, 将不同之处添加至修改位置列表
-    if olddata == []:     # 无信息
+    if query_result == []:     # 无信息
         # logger.debug('添加新信息')
         
-        sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
-        dbexecute(sql)
+        #sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
+    
+        dbexecute(f"INSERT INTO illusts VALUES (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
         status = ['0']
-    elif olddata[0][1] == newdata[1]:
-        # logger.debug('数据重复，无需添加')
-        status = ['1']
-    else:
-        for i in range(len(olddata[0])):
-            if olddata[0][i] != newdata[i]:
-                data_to_modify[i] = 1
-        for i in range(len(data_to_modify)):
-            if data_to_modify[i] == 1 and i == 1:  # 只修改jptag和is_private值
-                # logger.debug('更新jptag数据, 修改is_translated值')
-                # 下面这里要加个""才行
-                dbexecute(f'''
-                                UPDATE illusts SET {var[1][0]} = "{var[1][1]}" where pid = {pid}
-                                ''')
-                dbexecute(f'''
-                                UPDATE illusts SET {var[3][0]} = {var[3][1]} where pid = {pid}
-                                ''')
 
-            elif data_to_modify[i] == 1 and i == 4:
-                # logger.debug('更新is_private数据')
-                dbexecute(f'''
-                                UPDATE illusts SET {var[4][0]} = {var[4][1]} where pid = {pid}
-                                ''')
+    else:     # 有信息
+        # 查询table_info，并从返回值中获取列名
+        db_columns = [column_data[1] for column_data in dbexecute('PRAGMA table_info(illusts)')]
+        necessary_columns = ['jptag', 'is_private']
+        
+        # 格式化数据
+        newdata = {'jptag': jptag, 'is_private': is_private}
+        olddata_ = {}
+        olddata: tuple = query_result[0]
+        for i in range(len(olddata)):
+            if db_columns[i] in necessary_columns:
+                olddata_[db_columns[i]] = olddata[i]
+        
+        if newdata == olddata_:
+            # logger.debug('数据重复，无需添加')
+            status = ['1']
+        else:
+            if olddata_['jptag'] != newdata['jptag']:   # 插画添加了新的tag，删除旧的翻译，更新翻译状态
+                dbexecute('UPDATE illusts SET jptag = ?, transtag = ?, is_translated = ?, is_private = ? WHERE pid = ?',(jptag, '0', 0, is_private, pid))
+            else:   # 用户修改了插画隐藏属性
+                dbexecute('UPDATE illusts SET is_private = ? WHERE pid = ?', (is_private, pid))
             status = ['2']
+
     return status
 def writeraw_to_db_m(th_count, illdata):
-    """将所有tag提交至数据库
+    """将插画tag,是否隐藏等属性提交至数据库
 
     Args:
         th_count (int): 线程数
@@ -615,6 +622,19 @@ def writeraw_to_db_m(th_count, illdata):
         if var_check(eval(param.name)) == 1:
             raise ValCheckError
     try:
+        # 删除不在收藏中的插画信息
+        pids = [i['id'] for i in illdata]
+        old_pids = [p[0] for p in dbexecute("SELECT pid FROM illusts")]
+        
+        set_pids = set(pids)
+        set_old_pids = set(old_pids)
+        
+        intersection = set_pids & set_old_pids # 求交集
+        set_delete_pids = set_old_pids - intersection
+        delete_pids = list(set_delete_pids)
+        
+        dbexecute('DELETE FROM illusts WHERE pid = ?', delete_pids, many = True)
+        logger.info(f"从数据库删除不在收藏中的插画 {len(delete_pids)} 张")
         all_th = []
         result = []
         logger.info(f'创建线程池，线程数量: {th_count}')
@@ -1043,7 +1063,7 @@ def main():
                 f.write('')
                 f.close()
 
-        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-同步fetch_translated_tag_i函数获取的有效数据  4-退出')
+        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-同步上次运行时获取的有效数据（若有）  4-退出')
         mode = input('模式 = ')
         if mode == '1':
             start = time.time()
