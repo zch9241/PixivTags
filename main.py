@@ -6,7 +6,8 @@
 # Copyright (c) 2024, zch9241. All rights reserved.  
 # 
 # This source code is provided "AS IS" without any warranty of any kind.  
-# You may use this source code for any purpose, provided that you do not violate any applicable laws or regulations. However, you are not authorized to distribute, modify, or sublicense this source code without the express written permission of the copyright owner.  
+# You may use this source code for any purpose, provided that you do not violate any applicable laws or regulations. 
+# This software is for personal and educational use only and may not be used for any commercial purpose. Without the express written consent of the author, no one is permitted to sell or lease this software or its derivative works in any form.  
 #  
 # If you have any questions or need further clarification, please contact:  
 # [zch2426936965@gmail.com]
@@ -14,22 +15,19 @@
 
 # standard-libs
 import base64
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, as_completed, ALL_COMPLETED
 import datetime
 from difflib import get_close_matches
 import inspect
 import json
 import logging
 import os
+import pdb
 import re
 import shutil
 import sqlite3
 import sys
 import threading
-import tkinter as tk
-from tkinter import ttk
-from tkinter import scrolledtext
-from tkinter.font import Font
 import time
 import traceback
 from urllib import parse
@@ -39,10 +37,10 @@ import pandas as pd
 import psutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
+from tqdm import tqdm
 from win10toast import ToastNotifier
 import yaml
 
@@ -66,7 +64,6 @@ CWD = os.getcwd()
 SQLPATH = CWD + r'\src\illdata.db'
 COOKIE_PATH = CWD + r'\src\cookies.yaml'
 TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
-CHROME_DRIVER_PATH = CWD + r'\bin\chromedriver.exe' 
 
 # 交互模式
 reserve_words = {'help': '_help()', 'exit': '_exit()',
@@ -80,56 +77,46 @@ help_text = """
 `hot`: 列出出现最多的tags
 """
 
-# GUI初始化
-root = tk.Tk()
-font_ = Font(family="Consolas", size=8, weight="bold")
-text_widget = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=120, height=30, font=font_)
-text_widget.pack(fill=tk.BOTH, expand=True)
-text_widget.config(state='disabled')  # 禁止直接编辑
-
-
 # 日志初始化
-## GUI日志
-class TkinterLogHandler(logging.Handler):  
-    def __init__(self, text_widget):  
-        super().__init__()  
-        self.text_widget = text_widget  
-  
-    def emit(self, record):  
-        msg = self.format(record)  
-        def append():  
-            self.text_widget.config(state='normal')  
-            self.text_widget.insert(tk.END, msg + '\n')  
-            self.text_widget.yview(tk.END)  
-            self.text_widget.config(state='disabled')  
-          
-        # 确保GUI更新在主线程中执行  
-        self.text_widget.after(0, append)  
-
-logger = logging.getLogger('guilogger')  
+logger = logging.getLogger('logger')
+handler = logging.StreamHandler()
 logger.setLevel(logging.DEBUG)
-
-# 将TkinterLogHandler添加到日志器  
-handler = TkinterLogHandler(text_widget)  
+handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter(
     "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
 handler.setFormatter(formatter)
-logger.addHandler(handler) 
-
-
-## 控制台日志
-#logger = logging.getLogger('logger')
-#handler = logging.StreamHandler()
-#logger.setLevel(logging.DEBUG)
-#handler.setLevel(logging.DEBUG)
-#formatter = logging.Formatter(
-#    "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
-#handler.setFormatter(formatter)
-#logger.addHandler(handler)
+logger.addHandler(handler)
 
 # Toast初始化
 toaster = ToastNotifier()
 
+# 数据库初始化
+conn = sqlite3.connect(SQLPATH)  
+cursor = conn.cursor()  
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS "illusts" (
+	"pid"	INTEGER,
+	"jptag"	TEXT,
+	"transtag"	TEXT,
+	"is_translated"	INTEGER,
+	"is_private"	INTEGER,
+	PRIMARY KEY("pid")
+)
+               ''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS "removed" (
+	"pid"	INTEGER UNIQUE
+)
+               ''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS "tags" (
+	"jptag"	TEXT,
+	"transtag"	TEXT
+);
+               ''')
+conn.commit()
+cursor.close()
+conn.close()
 
 # 获取cookies
 def get_cookies(rtime: int) -> list:
@@ -212,18 +199,18 @@ def get_cookies(rtime: int) -> list:
     logger.info(f'解密完成，数量 {len(cookie)}')
     return cookie
 
-def get_cookies_by_selenium(rtime: int) -> list:
+def get_cookies_by_selenium(rtime: int, forced = False) -> list:
     """获取Google Chrome的cookies
 
     Args:
         rtime (int): cookie更新间隔
+        forced (bool): 是否强制更新
 
     Returns:
         (list): 包含所有pixiv的cookie的列表
     """
     global update_cookies
     cookie = []
-    
     
     # 判断是否需要更新cookies
     with open(COOKIE_PATH, 'r') as f:
@@ -237,14 +224,14 @@ def get_cookies_by_selenium(rtime: int) -> list:
             relative_time = -1
         f.close()
     
-    if relative_time < rtime and relative_time > 0:
+    if relative_time < rtime and relative_time > 0 and forced == False:
         update_cookies = False
         logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
     else:
         update_cookies = True
         logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
 
-        # 判断Google Chrome是否在运行，是则结束
+        # 判断Google Chrome是否在运行，是则结束，否则会报 SessionNotCreatedException
         def find_process(name):
             "遍历所有进程，查找特定名称的进程"
             for proc in psutil.process_iter(['pid', 'name']):
@@ -294,7 +281,7 @@ def dbexecute(query, params=None, many=False):
     Args:
         query (str): sql命令
         params (tuple|list, optional): 查询参数. Defaults to None.
-        many (bool, optional): 是否对多行数据进行操作. Defaults to False.
+        many (bool, optional): 是否对多行数据进行操作,若将参数设为True,请确保传入的query为列表类型. Defaults to False.
 
     Returns:
         list|None: 查询结果（若有）
@@ -340,6 +327,36 @@ def var_check(*args):
             return True
 
 
+def handle_exception(logger, func_name):
+    exc_type, exc_value, tb = sys.exc_info()
+    logger.error(f'错误 {exc_type.__name__}: {exc_value}')
+    
+    # 获取完整的堆栈跟踪信息
+    tb_list = traceback.format_tb(tb)
+    ex = "".join(tb_list)
+    logger.error(ex)
+
+    return f'ERROR {func_name}'
+
+
+def init_driver():
+    '''
+    # 初始化driver，返回WebDriver
+    '''
+    options = Options()
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    options.add_argument('--headless')
+    options.add_argument('--log-level=3')
+    ## 对chrome 129版本无头模式白屏的临时解决办法 (https://stackoverflow.com/questions/78996364/chrome-129-headless-shows-blank-window)
+    # options.add_argument("--window-position=-2400,-2400")
+
+
+    driver = webdriver.Chrome(options = options)
+    
+    return driver
+
+
+
 def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
     '''
     # 解析收藏接口
@@ -349,6 +366,7 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
     - `rest_flag`: 可见设置 (= 0,1,2),分别对应show(公开),hide(不公开),show+hide [默认为2]
     - `limit`: 每次获取的pid数目 (= 1,2,3,...,100) [默认为100(最大)]
     '''
+    logger.info('正在运行')
     signature = inspect.signature(analyse_bookmarks)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
@@ -366,14 +384,7 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
 
             logger.debug('创建driver实例')
 
-            options = Options()
-            options.add_argument('--log-level=3')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--headless')
-            # 对chrome 129版本无头模式白屏的临时解决办法 (https://stackoverflow.com/questions/78996364/chrome-129-headless-shows-blank-window)
-            options.add_argument("--window-position=-2400,-2400")
-            service = Service(executable_path = CHROME_DRIVER_PATH)
-            driver = webdriver.Chrome(options=options, service=service)
+            driver = init_driver()
 
             logger.debug('访问rest=show')
             driver.get(testurl_show)
@@ -446,16 +457,8 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
         logger.info(f'解析接口URL完成, 数量: {len(urls)}')
         # print(urls)
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
-        urls = f'ERROR {analyse_bookmarks.__name__}'
+        urls = handle_exception(logger, inspect.currentframe().f_code.co_name)
     return urls
-
 
 
 def analyse_illusts_i(url, cookie) -> list:
@@ -469,49 +472,52 @@ def analyse_illusts_i(url, cookie) -> list:
 
     illustdata = []
     ignores = 0
+    def inner(count):
+        nonlocal ignores, illustdata
+        try:
+            driver = init_driver()
 
-    options = Options()
-    options.add_argument('--log-level=3')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--headless')
-    options.add_argument("--window-position=-2400,-2400")
-    service = Service(executable_path = CHROME_DRIVER_PATH)
-    driver = webdriver.Chrome(options=options, service=service)
+            driver.get(url)
+            for cok in cookie:
+                driver.add_cookie(cok)
+            driver.refresh()
 
-    driver.get(url)
-    for cok in cookie:
-        driver.add_cookie(cok)
-    driver.refresh()
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_all_elements_located)
+            #tqdm.write('DEBUG 接口所有元素加载完毕，准备解析...')
 
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_all_elements_located)
-    logger.debug('接口所有元素加载完毕，准备解析...')
-
-    # 解析每张插画的信息，添加到列表
-    resp: dict = json.loads(
-        driver.find_element(
-            By.CSS_SELECTOR, 'body > pre'
-        ).text
-    )
-    driver.quit()
-    idata = resp['body']['works']
-    for ildata in idata:
-        if ildata['isMasked'] == True:
-            logger.info(f"此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
-            ignores += 1
-        else:
-            illustdata.append(ildata)
-
-    time.sleep(0.1)
+            # 解析每张插画的信息，添加到列表
+            resp: dict = json.loads(
+                driver.find_element(
+                    By.CSS_SELECTOR, 'body > pre'
+                ).text
+            )
+            driver.quit()
+            idata = resp['body']['works']
+            for ildata in idata:
+                if ildata['isMasked'] == True:
+                    tqdm.write(f"INFO 此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
+                    ignores += 1
+                else:
+                    illustdata.append(ildata)
+        except Exception:
+            handle_exception(logger, inspect.currentframe().f_code.co_name)
+            tqdm.write('INFO 重试')
+            if count >= 1:
+                inner(count - 1)
+            else:
+                tqdm.write('WARNING 达到最大递归深度')
+    inner(10)
+        
     return illustdata, ignores
-def analyse_illusts_m(th_count, urls, cookie, recursion = 0) -> list:
+def analyse_illusts_m(th_count, urls, cookie) -> list:
     '''
     analyse_illusts_i的主线程, 整合信息
     - `th_count`: 线程数量
     - `urls`: 请求url列表
     - `cookie`: pixiv上的cookie
-    - `recursion`: 判断递归次数
     '''
+    logger.info('正在运行')
     signature = inspect.signature(analyse_illusts_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
@@ -519,47 +525,25 @@ def analyse_illusts_m(th_count, urls, cookie, recursion = 0) -> list:
     try:
         illdata = []
         all_th = {}
-        retry_urls = []
         ignores = 0
-        recursion += 1
         
         logger.info(f'创建线程池，线程数量: {th_count}')
         with ThreadPoolExecutor(max_workers=th_count) as pool:
             for u in urls:
                 all_th[u] = pool.submit(analyse_illusts_i, u, cookie)
-            wait(all_th.values(), return_when=ALL_COMPLETED)
+            for _ in tqdm(as_completed(list(all_th.values())), total = len(list(all_th.values()))):
+                pass
             logger.info('所有线程运行完成')
             # 获取各线程返回值
             for u, t_res in all_th.items():
                 result = t_res.result()
-                if type(result) != type(None):
-                    ill, ign = result
-                    if not type(ill) == type(None):
-                        illdata.extend(ill)
-                        ignores += ign
-                else:
-                    logger.warning('线程池中某个函数返回了None, 在循环结束后将递归重试')
-                    retry_urls.append(u)
-            
-        if retry_urls != [] and recursion <= 10:
-            logger.info('出现重试可能为装饰器部分的问题，请检查装饰器是否打印了报错信息')
-            logger.info(f'需要重试的url数量 {len(retry_urls)} 开始重试')
-            retrydata = analyse_illusts_m(th_count, retry_urls, recursion)
-            illdata.extend(retrydata)
-            
-        if recursion > 1:  
-            logger.info(f'重试完成，总插画数量: {len(illdata)}，忽略数量: {ignores}，递归次数: {recursion}') 
-        else:
-            logger.info(f'所有插画信息获取完成，长度: {len(illdata)} 忽略数量: {ignores}')
+                ill, ign = result
+                illdata.extend(ill)
+                ignores += ign
+                
+        logger.info(f'所有插画信息获取完成，长度: {len(illdata)} 忽略数量: {ignores}')
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
-        illdata = f'ERROR {analyse_illusts_m.__name__}'
+        illdata = handle_exception(logger, inspect.currentframe().f_code.co_name)
     return illdata
 
 
@@ -572,7 +556,7 @@ def writeraw_to_db_i(illdata) -> list:
     jptag = str(illdata['tags'])
     transtag = '0'
     is_translated = 0
-    is_private = illdata['bookmarkData']['private']
+    is_private = int(illdata['bookmarkData']['private'])
 
     # 先查询已有信息，再判断是否需要修改
     sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
@@ -582,8 +566,7 @@ def writeraw_to_db_i(illdata) -> list:
         # logger.debug('添加新信息')
         
         #sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
-    
-        dbexecute(f"INSERT INTO illusts VALUES (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
+        dbexecute(f"INSERT INTO illusts (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
         status = ['0']
 
     else:     # 有信息
@@ -617,24 +600,28 @@ def writeraw_to_db_m(th_count, illdata):
         th_count (int): 线程数
         illdata (list): 插画详细信息
     """
+    logger.info('正在运行')
     signature = inspect.signature(writeraw_to_db_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
             raise ValCheckError
     try:
         # 删除不在收藏中的插画信息
-        pids = [i['id'] for i in illdata]
+        pids = [int(i['id']) for i in illdata]
         old_pids = [p[0] for p in dbexecute("SELECT pid FROM illusts")]
         
         set_pids = set(pids)
         set_old_pids = set(old_pids)
         
-        intersection = set_pids & set_old_pids # 求交集
+        intersection = set_pids & set_old_pids # 求交集，交集内是要保留的pid
         set_delete_pids = set_old_pids - intersection
         delete_pids = list(set_delete_pids)
+        delete_query = [(p,) for p in delete_pids]
         
-        dbexecute('DELETE FROM illusts WHERE pid = ?', delete_pids, many = True)
-        logger.info(f"从数据库删除不在收藏中的插画 {len(delete_pids)} 张")
+        dbexecute('DELETE FROM illusts WHERE pid = ?', delete_query, many = True)
+        dbexecute('INSERT INTO removed (pid) VALUES (?)', delete_query, many = True)
+        logger.info(f"从数据库转移不在收藏中的插画 {len(delete_pids)} 张")
+        
         all_th = []
         result = []
         logger.info(f'创建线程池，线程数量: {th_count}')
@@ -643,20 +630,14 @@ def writeraw_to_db_m(th_count, illdata):
                 i = illdata.pop(0)
                 all_th.append(pool.submit(writeraw_to_db_i, i))
             wait(all_th, return_when=ALL_COMPLETED)
-            for th in all_th:
+            for th in tqdm(as_completed(all_th), total = len(all_th)):
                 result.extend(th.result())
                 if th.exception():
                     logger.error(f'运行时出现错误: {th.exception()}')
             logger.info(
                 f"所有线程运行完成, 添加: {result.count('0')}  修改: {result.count('2')}  跳过: {result.count('1')}")
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
 def write_tags_to_db_i(tag) -> list:
@@ -677,7 +658,7 @@ def write_tags_to_db_i(tag) -> list:
         # logger.debug(f'出现重复tag: {e}', exc_info = True)
         status = ['1']
     except Exception:
-        logger.error(f'数据库操作错误，重试: {sys.exc_info()}')
+        tqdm.write(f'ERROR 数据库操作错误，重试: {sys.exc_info()}')
         status = write_tags_to_db_i(tag)
     con.close()
     return status
@@ -685,6 +666,7 @@ def write_tags_to_db_m(th_count):
     '''
     提交原始tags
     '''
+    logger.info('正在运行')
     signature = inspect.signature(write_tags_to_db_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
@@ -712,7 +694,7 @@ def write_tags_to_db_m(th_count):
                 tag = tags.pop(0)
                 all_th.append(pool.submit(write_tags_to_db_i, tag))
             wait(all_th, return_when=ALL_COMPLETED)
-            for th in all_th:
+            for th in tqdm(as_completed(all_th), total = len(all_th)):
                 result.extend(th.result())
 
                 if th.exception():
@@ -720,24 +702,9 @@ def write_tags_to_db_m(th_count):
             logger.info(
                 f"所有线程运行完成, 添加: {result.count('0')}  跳过: {result.count('1')}")
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
-i_count = 0
-def notify_formatter(step=0.02):
-    nflag = {}
-    progress = 0
-    while progress <= 1:
-        progress += step
-        nflag[progress] = False
-    return nflag
-nflag = notify_formatter()
 def fetch_translated_tag_i(j, tot, cookie, priority=None):
     '''
     发送请求获取翻译后的tag \n
@@ -748,19 +715,15 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
     - `cookie`: pixiv上的cookie
     - `priority`: 语言优先级
     '''
-    global i_count
     priority = ['zh', 'en', 'zh_tw']
     # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
     jf = parse.quote(j, safe='')
 
-    options = Options()
-    options.add_argument('--log-level=3')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--headless')
-    options.add_argument("--window-position=-2400,-2400")
-    service = Service(executable_path = CHROME_DRIVER_PATH)
-    driver = webdriver.Chrome(options=options, service=service)
-    def get():
+    driver = init_driver()
+    def get(count):
+        '''
+        count: 规定最大递归深度
+        '''
         try:
             driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
             for cok in cookie:
@@ -769,10 +732,13 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
             WebDriverWait(driver, 10).until(
                 EC.presence_of_all_elements_located)
         except Exception:
-            logger.error(f'请求tag接口时出错,重试 {sys.exc_info()}')
+            tqdm.write(f'ERROR 请求tag接口时出错,重试 {sys.exc_info()}')
             time.sleep(1)
-            get()
-    get()
+            if count >= 1:
+                get(count - 1)
+            else:
+                logger.warning('达到最大递归深度')
+    get(10)
     
     resp: dict = json.loads(
         driver.find_element(
@@ -782,19 +748,19 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
     
     driver.quit()
     if type(resp) == type(None):
-        logger.warning(f'服务器返回值不正确 此次请求tag: {j}')
+        tqdm.write(f'WARNING 服务器返回值不正确 此次请求tag: {j}')
         with open(TAG_LOG_PATH, 'a') as f:
             f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
             f.write(f'请求tag {j}')
             f.write('\n')
             f.close()
-        logger.info('失败的tag已写入日志')
+        tqdm.write('INFO 失败的tag已写入日志')
     else:
         tagTranslation = resp['body']['tagTranslation']
         transtag = ''
         if tagTranslation == []:
             # print(tagTranslation)
-            logger.info(f'无tag {j} 的翻译')
+            tqdm.write(f'INFO 无tag {j} 的翻译')
             # result = {j: 'None'}
             result = {j: j}
         else:
@@ -812,38 +778,18 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
                         for _ in trans.keys():
                            if trans[_] == available:
                                av.append(_)
-                logger.info(f'tag {j} 无目标语言的翻译 & 可用的语言 {av}')
+                tqdm.write(f'INFO tag {j} 无目标语言的翻译 & 可用的语言 {av}')
                 result = {j: j}
             else:
                 result = {j: transtag}
-
-    i_count+=1
-    for i in nflag:
-        if i_count / tot > i and nflag[i] == False:
-            logger.info(f'fetch_translated_tag 当前进度(近似值): {i.__round__(5)}')
-            nflag[i] = True
     # 写入文件
     if result != None:
-        def writefile():
-            # 通过递归防止写入失败
-            try:
-                with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
-                    f.write(str(result) + '\n')
-                    f.close()
-            except Exception:
-                logger.error(f'错误 {sys.exc_info()}')
-                print(f'错误 {sys.exc_info()}')
-                tb = sys.exc_info()[2]
-                tb_list = traceback.format_tb(tb)
-                ex = "".join(tb_list)
-                logger.error(ex)
-                print(ex)
-                logger.info('重试写入...')
-                writefile()
-        writefile()
-    
+        with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
+            f.write(str(result) + '\n')
+            f.close()
     # return result
 def fetch_translated_tag_m(th_count, cookie) -> list:
+    logger.info('正在运行')
     signature = inspect.signature(fetch_translated_tag_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
@@ -864,11 +810,13 @@ def fetch_translated_tag_m(th_count, cookie) -> list:
         logger.info(f'创建线程池，线程数量: {th_count}')
 
         with ThreadPoolExecutor(max_workers=th_count) as pool:
-            all_th = []
-            for j in jptags:
-                all_th.append(pool.submit(fetch_translated_tag_i, j, len(jptags), cookie))
+            all_th = [pool.submit(fetch_translated_tag_i, j, len(jptags), cookie) for j in jptags]
 
-            wait(all_th, return_when=ALL_COMPLETED)
+            for th in tqdm(as_completed(all_th), total=len(all_th)):
+                if th.exception():
+                    logger.error(f'运行时出现错误: {th.exception()}')
+                
+
             # 读取文件
             logger.debug('tag翻译完成，从文件中读取结果')
             with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
@@ -886,14 +834,7 @@ def fetch_translated_tag_m(th_count, cookie) -> list:
             
             logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
-        result = f'ERROR {fetch_translated_tag_m.__name__}'
+        result = handle_exception(logger, inspect.currentframe().f_code.co_name)
     return result
 
 
@@ -902,7 +843,7 @@ def write_transtags_to_db_i(tran: dict):
     `tran`: 需要提交的tags (jp:tr)
     '''
     if type(tran) == type(None):
-        logger.warning('参数为NoneType类型，忽略')
+        tqdm.write('ERROR 参数为NoneType类型，忽略')
     else:
         transtag = list(tran.values())[0]
         jptag = list(tran.keys())[0]
@@ -917,6 +858,7 @@ def write_transtags_to_db_m(th_count, trans):
         th_count (int): 线程数
         trans (list): 包含原tag与翻译后tag字典的列表集合
     """
+    logger.info('正在运行')
     signature = inspect.signature(write_transtags_to_db_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
@@ -928,68 +870,56 @@ def write_transtags_to_db_m(th_count, trans):
             for t in trans:
                 exc = pool.submit(write_transtags_to_db_i, t)
                 all_th.append(exc)
-            wait(all_th, return_when=ALL_COMPLETED)
+            for th in tqdm(as_completed(all_th), total=len(all_th)):
+                if th.exception():
+                    logger.error(f'运行时出现错误: {th.exception()}')
         logger.info('翻译后的tag已提交至表tags')
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
 def transtag_return_i(r0):
-    if type(r0) != type(None):
-        pid, jptag0 = r0[0], r0[1]
-        jptags = eval(jptag0)
-        l = [''] * len(jptags)
-        for i in range(len(jptags)):
-            resp = dbexecute('''
-                        SELECT * FROM tags
-                        ''')
-            for r in resp:
-                jptag, transtag = r
-                if jptag == jptags[i]:
-                    l[i] = base64.b64encode(transtag.encode('utf-8'))
-        dbexecute(f'''
-                    UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
+    pid, jptag0 = r0[0], r0[1]
+    jptags = eval(jptag0)
+    l = [''] * len(jptags)
+    for i in range(len(jptags)):
+        resp = dbexecute('''
+                    SELECT * FROM tags
                     ''')
-        dbexecute(f'''
-                    UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
-                    ''')
-        # logger.debug(l)
-    else:
-        logger.warning('参数为NoneType类型，忽略')
+        for r in resp:
+            jptag, transtag = r
+            if jptag == jptags[i]:
+                l[i] = base64.b64encode(transtag.encode('utf-8'))
+    dbexecute(f'''
+                UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
+                ''')
+    dbexecute(f'''
+                UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
+                ''')
+    # logger.debug(l)
 def transtag_return_m(th_count):
     '''
     上传翻译后的tags至表illust
     '''
+    logger.info('正在运行')
     signature = inspect.signature(transtag_return_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
             raise ValCheckError()
     try:
-        all_th = []
         logger.info(f'创建线程池，线程数量: {th_count}')
         with ThreadPoolExecutor(max_workers=th_count) as pool:
             resp0 = dbexecute('''
                         SELECT * FROM illusts
                         ''')
-            for r0 in resp0:
-                all_th.append(pool.submit(transtag_return_i, r0))
-
-            wait(all_th, return_when=ALL_COMPLETED)
+            
+            all_th = [pool.submit(transtag_return_i, r0) for r0 in resp0]
+            for th in tqdm(as_completed(all_th), total=len(all_th)):
+                if th.exception():
+                    logger.error(f'运行时出现错误: {th.exception()}')
         logger.info('翻译后的tag已提交至表illust')
     except Exception:
-        logger.error(f'错误 {sys.exc_info()}')
-        print(f'错误 {sys.exc_info()}')
-        tb = sys.exc_info()[2]
-        tb_list = traceback.format_tb(tb)
-        ex = "".join(tb_list)
-        logger.error(ex)
-        print(ex)
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
 def mapping() -> dict:
@@ -1069,6 +999,7 @@ def main():
             start = time.time()
             cookie = get_cookies_by_selenium(rtime=COOKIE_EXPIRED_TIME)
             URLs = analyse_bookmarks(cookie=cookie)
+            
             # debug:
             # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
@@ -1210,17 +1141,6 @@ def main():
         else:
             print('未知的指令')
         print('')
-def start_logging():  
-    # 清除之前的日志（可选）  
-    text_widget.delete(1.0, tk.END)  
-    # 开始记录日志  
-    def run_main():     #将main函数作为线程运行
-        th = threading.Thread(target=main)
-        th.start()
-    root.after(1000, run_main)  
-
-button = ttk.Button(root, text="运行主程序", command=start_logging)  
-button.pack(pady=20)
 
 if __name__ == "__main__":
-    root.mainloop()
+    main()

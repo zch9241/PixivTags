@@ -16,7 +16,7 @@
 
 ## 使用说明
 
-1. 编辑项目根目录下的`config.py`
+1. 编辑`config.py`，其位于/src/
 
    ```Python
    UID: str = ''    # 修改为你的UID
@@ -38,14 +38,13 @@
    UID: str = '71963925'                    # 你的pixiv UID
    COOKIE_EXPIRED_TIME = 43200              # 重新获取cookie的时间间隔
 
-2. 本项目利用`Google Chrome`保存的cookie实现登录，所以请提前使用上述浏览器登录pixiv
+2. 本项目利用`Google Chrome`保存的cookie实现登录，所以请提前使用上述浏览器登录pixiv以保留登录凭据
 
-3. 本项目使用`selenium`实现浏览器自动化，请[下载](https://developer.chrome.com/docs/chromedriver/downloads/version-selection)与Chrome版本相同的`chromedriver`(需要魔法)
-
-4. 本项目不提供访问pixiv的方法，请自行解决网络问题
+3. 本项目不提供访问pixiv的方法，请自行解决网络问题
 
 ## 版权  
   
 © 2024 zch9241. All rights reserved.  
   
-本项目版权归 [zch9241] 所有，未经授权不得复制、分发或用于商业目的。
+本软件版权归 [zch9241] 所有，转载请保留此声明
+本软件仅供个人及教育用途，不得用于任何商业目的。未经作者书面同意，任何人不得以任何形式出售、出租或分发本软件及其衍生作品。
