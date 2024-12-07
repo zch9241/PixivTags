@@ -35,11 +35,6 @@ from urllib import parse
 import pandas as pd
 from playwright.sync_api import sync_playwright
 import psutil
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
 from tqdm import tqdm
 from win10toast import ToastNotifier
 
