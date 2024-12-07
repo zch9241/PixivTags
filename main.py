@@ -22,7 +22,6 @@ import inspect
 import json
 import logging
 import os
-import pdb
 import re
 import shutil
 import sqlite3
@@ -34,6 +33,7 @@ from urllib import parse
 
 # site-packages
 import pandas as pd
+from playwright.sync_api import sync_playwright
 import psutil
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -42,11 +42,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from tqdm import tqdm
 from win10toast import ToastNotifier
-import yaml
 
 
-import decrypt
-import decrypt_by_selenium
+
 from src import config
 
 
@@ -58,11 +56,13 @@ FETCH_TRANSLATED_TAG_THREADS = config.FETCH_TRANSLATED_TAG_THREADS
 WRITE_TRANSTAGS_TO_DB_THREADS = config.WRITE_TRANSTAGS_TO_DB_THREADS
 TRANSTAG_RETURN_THREADS = config.TRANSTAG_RETURN_THREADS
 UID = config.UID
+CHROME_PATH = config.CHROME_PATH
 COOKIE_EXPIRED_TIME = config.COOKIE_EXPIRED_TIME
 
 CWD = os.getcwd()
 SQLPATH = CWD + r'\src\illdata.db'
-COOKIE_PATH = CWD + r'\src\cookies.yaml'
+COOKIE_PATH = CWD + r'\src\cookies.json'
+COOKIE_TIME_PATH = CWD + r'\src\cookies_modify_time'
 TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
 
 # 交互模式
@@ -119,119 +119,28 @@ cursor.close()
 conn.close()
 
 # 获取cookies
-def get_cookies(rtime: int) -> list:
-    """获取Google Chrome的cookies \n
-    已弃用
-
-    Args:
-        rtime (int): cookie更新间隔
-
-    Returns:
-        (list): 包含所有pixiv的cookie的列表
-    """
-    global update_cookies
-    cookie = []
-
-    # 判断是否需要更新cookies
-    mod_time = os.path.getmtime(COOKIE_PATH)
-    relative_time = time.time() - mod_time
-    if relative_time < rtime:
-        update_cookies = False
-        logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
-    else:
-        update_cookies = True
-        logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
-
-        # 判断Google Chrome是否在运行，是则结束
-        def find_process(name):
-            "遍历所有进程，查找特定名称的进程"
-            for proc in psutil.process_iter(['pid', 'name']):
-                try:
-                    if name.lower() in proc.info['name'].lower():
-                        return proc
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-            return None
-
-        def kill_process(name):
-            "查找特定名称的进程并让用户结束"
-            proc = find_process(name)
-            while proc:
-                logger.info(
-                    f"找到进程：{proc.info['name']}, PID: {proc.info['pid']}, 请结束进程，否则cookies无法正常获取")
-                os.system('pause')
-                proc = find_process(name)
-        kill_process("chrome.exe")
-
-        # 复制文件
-        logger.info('更新cookie文件')
-        # 定义cookie、localstate、logindata三个文件的位置
-        cookie_path = os.path.expanduser(os.path.join(
-            os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data\Default\Network\Cookies'))
-
-        local_state_path = os.path.join(
-            os.environ['LOCALAPPDATA'], r"Google\Chrome\User Data\Local State")
-
-        login_data_path = os.path.expanduser(os.path.join(
-            os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data\Default\Login Data'))
-
-        # 复制对应文件(后续debug用)
-        shutil.copy(cookie_path, CWD + r'\src\Cookies')
-        shutil.copy(local_state_path, CWD + r'\src\Local State')
-        shutil.copy(login_data_path, CWD + r'\src\Login Data')
-
-    # 解密cookies
-    logger.info('正在解密cookies')
-
-    cookies = decrypt.query_cookie("www.pixiv.net")
-    for data in cookies:
-        cookie.append(
-            {'name': data[1], 'value': decrypt.chrome_decrypt(data[2]), 'domain': data[0]})
-    cookies = decrypt.query_cookie(".pixiv.net")
-    for data in cookies:
-        cookie.append(
-            {'name': data[1], 'value': decrypt.chrome_decrypt(data[2]), 'domain': data[0]})
-    cookies = decrypt.query_cookie(".www.pixiv.net")
-    for data in cookies:
-        cookie.append(
-            {'name': data[1], 'value': decrypt.chrome_decrypt(data[2]), 'domain': data[0]})
-
-    logger.info(f'解密完成，数量 {len(cookie)}')
-    return cookie
-
-def get_cookies_by_selenium(rtime: int, forced = False) -> list:
+def get_cookies(rtime: int, forced = False):
     """获取Google Chrome的cookies
 
     Args:
         rtime (int): cookie更新间隔
         forced (bool): 是否强制更新
-
-    Returns:
-        (list): 包含所有pixiv的cookie的列表
     """
-    global update_cookies
-    cookie = []
-    
     # 判断是否需要更新cookies
-    with open(COOKIE_PATH, 'r') as f:
-        configs = f.read()
-        if configs != '':
-            config_dict = yaml.load(configs, yaml.Loader)
-            modify_time = config_dict['ModifyTime']
-            relative_time = time.time() - modify_time
+    with open(COOKIE_TIME_PATH, 'r') as f:
+        data = f.read()
+        if data != '':
+            modify_time = float(data)
         else:
-            # 未配置cookie时，即第一次运行
-            relative_time = -1
-        f.close()
+            modify_time = 0
+    relative_time = time.time() - modify_time
     
     if relative_time < rtime and relative_time > 0 and forced == False:
-        update_cookies = False
         logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
     else:
-        update_cookies = True
         logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
 
-        # 判断Google Chrome是否在运行，是则结束，否则会报 SessionNotCreatedException
+        # 判断Google Chrome是否在运行，是则结束，否则会报错
         def find_process(name):
             "遍历所有进程，查找特定名称的进程"
             for proc in psutil.process_iter(['pid', 'name']):
@@ -252,26 +161,23 @@ def get_cookies_by_selenium(rtime: int, forced = False) -> list:
                 proc = find_process(name)
         kill_process("chrome.exe")
 
-        logger.info('更新cookie文件')
         # 解密cookies
-        logger.info('正在获取cookies')
-        
-        cookies = decrypt_by_selenium.decrypt()
-        configs = yaml.dump(
-            {'ModifyTime': time.time(), 'Cookies': [cookies]})
+        with sync_playwright() as p:
+            browser = p.chromium.launch_persistent_context(headless=True,
+                executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                user_data_dir=os.path.expanduser(
+                    os.path.join(os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data'))
+                )
+            
+            with open(r'.\src\cookies.json','w') as f:
+                f.write(json.dumps(browser.cookies('https://www.pixiv.net')))
+            # 关闭浏览器
+            browser.close()
+        logger.info('解密完成')
+        # 更新获取cookie的时间
+        with open(COOKIE_TIME_PATH, "w") as f:
+            f.write(str(time.time()))
 
-        with open(COOKIE_PATH, 'w') as f:
-            f.write(configs)
-            f.close()
-        
-        logger.info(f'解密完成，数量 {len(cookies)}')
-    with open(COOKIE_PATH, 'r') as f:
-        configs = f.read()
-        config_dict = yaml.load(configs, yaml.Loader)
-        cookies = config_dict['Cookies'][0]
-        f.close()
-
-    return cookies
 
 # 数据库相关操作
 db_lock = threading.Lock()
@@ -339,25 +245,7 @@ def handle_exception(logger, func_name):
     return f'ERROR {func_name}'
 
 
-def init_driver():
-    '''
-    # 初始化driver，返回WebDriver
-    '''
-    options = Options()
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    options.add_argument('--headless')
-    options.add_argument('--log-level=3')
-    ## 对chrome 129版本无头模式白屏的临时解决办法 (https://stackoverflow.com/questions/78996364/chrome-129-headless-shows-blank-window)
-    # options.add_argument("--window-position=-2400,-2400")
-
-
-    driver = webdriver.Chrome(options = options)
-    
-    return driver
-
-
-
-def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
+def analyse_bookmarks(rest_flag=2, limit=100) -> list:
     '''
     # 解析收藏接口
     - 接口名称: https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=&limit=&rest=&lang=
@@ -379,51 +267,27 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
 
         # 解析作品数量
         def analyse_total():
-            testurl_show = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=show&lang=zh'
-            testurl_hide = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=hide&lang=zh'
+            url_show = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=show&lang=zh'
+            url_hide = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=hide&lang=zh'
 
-            logger.debug('创建driver实例')
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
+                context = browser.new_context(storage_state=COOKIE_PATH)
+                page = context.new_page()
+                
+                page.goto(url_show)
+                resp: dict = json.loads(
+                    page.locator('body > pre').inner_text())
+                total_show = resp['body']['total']
+                
+                page.goto(url_hide)
+                resp: dict = json.loads(
+                    page.locator('body > pre').inner_text())
+                total_hide = resp['body']['total']
+                
+                browser.close()
 
-            driver = init_driver()
-
-            logger.debug('访问rest=show')
-            driver.get(testurl_show)
-
-            logger.debug('添加cookies')
-            for cok in cookie:
-                driver.add_cookie(cok)
-            driver.refresh()
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located)
-            logger.debug('接口所有元素加载完毕，准备解析...')
-
-            resp: dict = json.loads(
-                driver.find_element(
-                    By.CSS_SELECTOR, 'body > pre'
-                ).text
-            )
-            total_show = resp['body']['total']
-
-            logger.debug('访问rest=hide')
-            driver.get(testurl_hide)
-
-            logger.debug('添加cookies')
-            for cok in cookie:
-                driver.add_cookie(cok)
-            driver.refresh()
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located)
-            logger.debug('接口所有元素加载完毕，准备解析...')
-
-            resp: dict = json.loads(
-                driver.find_element(
-                    By.CSS_SELECTOR, 'body > pre'
-                ).text
-            )
-            total_hide = resp['body']['total']
-            driver.quit()
-
-            logger.info(f'解析total字段完成, show数量: {total_show}, hide数量: {total_hide}')
+            logger.info(f'解析bookmarks完成, 公开数量: {total_show}, 不公开数量: {total_hide}')
 
             return total_show, total_hide
         total_show, total_hide = analyse_total()
@@ -461,12 +325,11 @@ def analyse_bookmarks(cookie, rest_flag=2, limit=100) -> list:
     return urls
 
 
-def analyse_illusts_i(url, cookie) -> list:
+def analyse_illusts_i(url) -> list:
     '''
     解析所有插画的信息
     - i就是individual的意思, 子线程
     - `url`: 接口URL
-    - `cookie`: pixiv上的cookie
     - `:return`: 插画信息的列表, 忽略的插画数量
     '''
 
@@ -475,24 +338,18 @@ def analyse_illusts_i(url, cookie) -> list:
     def inner(count):
         nonlocal ignores, illustdata
         try:
-            driver = init_driver()
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
+                context = browser.new_context(storage_state=COOKIE_PATH)
+                page = context.new_page()
 
-            driver.get(url)
-            for cok in cookie:
-                driver.add_cookie(cok)
-            driver.refresh()
+                page.goto(url)
+                # 解析每张插画的信息，添加到列表
+                resp: dict = json.loads(
+                    page.locator('body > pre').inner_text())
+                
+                browser.close()
 
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located)
-            #tqdm.write('DEBUG 接口所有元素加载完毕，准备解析...')
-
-            # 解析每张插画的信息，添加到列表
-            resp: dict = json.loads(
-                driver.find_element(
-                    By.CSS_SELECTOR, 'body > pre'
-                ).text
-            )
-            driver.quit()
             idata = resp['body']['works']
             for ildata in idata:
                 if ildata['isMasked'] == True:
@@ -510,7 +367,7 @@ def analyse_illusts_i(url, cookie) -> list:
     inner(10)
         
     return illustdata, ignores
-def analyse_illusts_m(th_count, urls, cookie) -> list:
+def analyse_illusts_m(th_count, urls) -> list:
     '''
     analyse_illusts_i的主线程, 整合信息
     - `th_count`: 线程数量
@@ -530,7 +387,7 @@ def analyse_illusts_m(th_count, urls, cookie) -> list:
         logger.info(f'创建线程池，线程数量: {th_count}')
         with ThreadPoolExecutor(max_workers=th_count) as pool:
             for u in urls:
-                all_th[u] = pool.submit(analyse_illusts_i, u, cookie)
+                all_th[u] = pool.submit(analyse_illusts_i, u)
             for _ in tqdm(as_completed(list(all_th.values())), total = len(list(all_th.values()))):
                 pass
             logger.info('所有线程运行完成')
@@ -705,7 +562,7 @@ def write_tags_to_db_m(th_count):
         handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
-def fetch_translated_tag_i(j, tot, cookie, priority=None):
+def fetch_translated_tag_i(j, priority=None):
     '''
     发送请求获取翻译后的tag \n
     最终将返回值写入.temp/result文件 \n
@@ -719,18 +576,23 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
     # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
     jf = parse.quote(j, safe='')
 
-    driver = init_driver()
+
     def get(count):
         '''
         count: 规定最大递归深度
         '''
         try:
-            driver.get(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
-            for cok in cookie:
-                driver.add_cookie(cok)
-            driver.refresh()
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located)
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
+                context = browser.new_context(storage_state=COOKIE_PATH)
+                page = context.new_page()
+                
+                page.goto(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
+                resp: dict = json.loads(
+                    page.locator('body > pre').inner_text()
+                )
+                browser.close()
+            return resp
         except Exception:
             tqdm.write(f'ERROR 请求tag接口时出错,重试 {sys.exc_info()}')
             time.sleep(1)
@@ -738,15 +600,9 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
                 get(count - 1)
             else:
                 logger.warning('达到最大递归深度')
-    get(10)
-    
-    resp: dict = json.loads(
-        driver.find_element(
-            By.CSS_SELECTOR, 'body > pre'
-        ).text
-    )
-    
-    driver.quit()
+                
+    resp = get(10)
+
     if type(resp) == type(None):
         tqdm.write(f'WARNING 服务器返回值不正确 此次请求tag: {j}')
         with open(TAG_LOG_PATH, 'a') as f:
@@ -788,7 +644,7 @@ def fetch_translated_tag_i(j, tot, cookie, priority=None):
             f.write(str(result) + '\n')
             f.close()
     # return result
-def fetch_translated_tag_m(th_count, cookie) -> list:
+def fetch_translated_tag_m(th_count) -> list:
     logger.info('正在运行')
     signature = inspect.signature(fetch_translated_tag_m)
     for param in signature.parameters.values():
@@ -810,7 +666,7 @@ def fetch_translated_tag_m(th_count, cookie) -> list:
         logger.info(f'创建线程池，线程数量: {th_count}')
 
         with ThreadPoolExecutor(max_workers=th_count) as pool:
-            all_th = [pool.submit(fetch_translated_tag_i, j, len(jptags), cookie) for j in jptags]
+            all_th = [pool.submit(fetch_translated_tag_i, j, len(jptags)) for j in jptags]
 
             for th in tqdm(as_completed(all_th), total=len(all_th)):
                 if th.exception():
@@ -997,14 +853,14 @@ def main():
         mode = input('模式 = ')
         if mode == '1':
             start = time.time()
-            cookie = get_cookies_by_selenium(rtime=COOKIE_EXPIRED_TIME)
-            URLs = analyse_bookmarks(cookie=cookie)
+            get_cookies(rtime=COOKIE_EXPIRED_TIME)
+            URLs = analyse_bookmarks()
             
             # debug:
             # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
-            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs, cookie)
+            illdata = analyse_illusts_m(ANALYSE_ILLUST_THREADS, URLs)
             # debug:
             #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
             #{'id': '117717637', 'title': 'おしごと終わりにハグしてくれる天使', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 4, 'url': 'https://i.pximg.net/c/250x250_80_a2/custom-thumb/img/2024/04/10/17/30/02/117717637_p0_custom1200.jpg', 'description': '', 'tags': ['オリジナル', '女の子', '緑髪', '天使', 'ハグ', '巨乳', 'ぱんつ', 'オリジナル1000users入り'], 'userId': '29164302', 'userName': '緑風マルト🌿', 'width': 1296, 'height': 1812, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25109862018', 'private': False}, 'alt': '#オリジナル おしごと終わりにハグしてくれる天使 - 緑風マルト🌿的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2024-04-10T17:30:02+09:00', 'updateDate': '2024-04-10T17:30:02+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 1, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2024/01/25/15/56/10/25434619_c70d86172914664ea2b15cec94bc0afd_50.png'},
@@ -1016,7 +872,7 @@ def main():
             write_tags_to_db_m(WRITE_TAGS_TO_DB_THREADS)
 
 
-            trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS, cookie)
+            trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
             
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]

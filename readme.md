@@ -6,13 +6,13 @@
 
 ## 安装指南
 
-1. 确保你安装了 `Python 3.10` (程序在其他版本可能出现兼容性问题)
+1. 确保你安装了 `Python 3.13` (程序在其他版本可能出现兼容性问题)
 2. 推荐使用 `Visual Code Studio` 运行本程序
 3. 克隆仓库
 
    ```bash
    git clone https://github.com/zch9241/PixivTags.git
-4. 进入项目目录并安装依赖项（请自行阅读根目录下`main.py`与`decrypt.py`的源代码）
+4. 进入项目目录并安装依赖项（请自行阅读根目录下`main.py`的源代码）
 
 ## 使用说明
 
@@ -20,6 +20,7 @@
 
    ```Python
    UID: str = ''    # 修改为你的UID
+   CHROME_PATH: str = r''     # 修改为Google Chrome主程序位置
 2. (使用vs code)运行项目根目录下的`main.py`
 
 3. 在 GUI 界面点击“运行主程序”，并在终端输入你想使用的运行模式
@@ -36,6 +37,7 @@
    WRITE_TRANSTAGS_TO_DB_THREADS: int = 10
    TRANSTAG_RETURN_THREADS: int = 10
    UID: str = '71963925'                    # 你的pixiv UID
+   CHROME_PATH: str = r''                   # Google Chrome主程序位置
    COOKIE_EXPIRED_TIME = 43200              # 重新获取cookie的时间间隔
 
 2. 本项目利用`Google Chrome`保存的cookie实现登录，所以请提前使用上述浏览器登录pixiv以保留登录凭据
