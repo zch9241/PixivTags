@@ -165,7 +165,8 @@ def get_cookies(rtime: int, forced = False):
                 )
             
             with open(r'.\src\cookies.json','w') as f:
-                f.write(json.dumps(browser.cookies('https://www.pixiv.net')))
+                state = {"cookies": browser.cookies('https://www.pixiv.net'), "origins": []}
+                f.write(json.dumps(state))
             # 关闭浏览器
             browser.close()
         logger.info('解密完成')
