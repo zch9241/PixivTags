@@ -13,6 +13,11 @@
 # [zch2426936965@gmail.com]
 # 
 
+# TODO:
+# 增加进度条预计时间精准度
+# 优化查询功能
+
+
 # standard-libs
 import base64
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed, ALL_COMPLETED
@@ -61,6 +66,13 @@ COOKIE_TIME_PATH = CWD + r'\src\cookies_modify_time'
 TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
 
 # 交互模式
+mode_select = """
+请选择模式: 
+1 = 更新tags至本地数据库
+2 = 基于本地数据库进行插画搜索
+3 = 向本地数据库提交上次运行时备份的有效数据(在程序报错时使用)
+4 = 退出
+"""
 reserve_words = {'help': '_help()', 'exit': '_exit()',
                  'search': '_search()', 'list': '_list()', 'hot': '_hot()'}
 help_text = """
@@ -562,10 +574,8 @@ def fetch_translated_tag_i(j, priority=None):
     '''
     发送请求获取翻译后的tag \n
     最终将返回值写入.temp/result文件 \n
-    返回值为 `dict : {'原tag': '翻译后的tag'}` \n
+    返回值为失败的tag or None \n
     - `j`: tag的名称
-    - `tot`: tags总数
-    - `cookie`: pixiv上的cookie
     - `priority`: 语言优先级
     '''
     priority = ['zh', 'en', 'zh_tw']
@@ -573,7 +583,7 @@ def fetch_translated_tag_i(j, priority=None):
     jf = parse.quote(j, safe='')
 
 
-    def get(count):
+    def get(count) -> dict | None:
         '''
         count: 规定最大递归深度
         '''
@@ -593,20 +603,22 @@ def fetch_translated_tag_i(j, priority=None):
             tqdm.write(f'ERROR 请求tag接口时出错,重试 {sys.exc_info()}')
             time.sleep(1)
             if count >= 1:
-                get(count - 1)
+                return get(count - 1)
             else:
                 logger.warning('达到最大递归深度')
+                return None
                 
     resp = get(10)
 
-    if type(resp) == type(None):
+    if resp is None:
         tqdm.write(f'WARNING 服务器返回值不正确 此次请求tag: {j}')
-        with open(TAG_LOG_PATH, 'a') as f:
+        with open(TAG_LOG_PATH, 'a', encoding = 'utf-8') as f:
             f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
             f.write(f'请求tag {j}')
             f.write('\n')
             f.close()
         tqdm.write('INFO 失败的tag已写入日志')
+        return j
     else:
         tagTranslation = resp['body']['tagTranslation']
         transtag = ''
@@ -627,19 +639,15 @@ def fetch_translated_tag_i(j, priority=None):
                 for available in trans.values():
                     if available != '':
                         # 是否有不用遍历的方法?
-                        for _ in trans.keys():
-                           if trans[_] == available:
-                               av.append(_)
+                        [av.append(_) for _ in trans.keys() if trans[_] == available]
                 tqdm.write(f'INFO tag {j} 无目标语言的翻译 & 可用的语言 {av}')
                 result = {j: j}
             else:
                 result = {j: transtag}
-    # 写入文件
-    if result != None:
+        
         with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
             f.write(str(result) + '\n')
             f.close()
-    # return result
 def fetch_translated_tag_m(th_count) -> list:
     logger.info('正在运行')
     signature = inspect.signature(fetch_translated_tag_m)
@@ -648,7 +656,6 @@ def fetch_translated_tag_m(th_count) -> list:
             raise ValCheckError
     try:
         jptags = []
-        result = []
 
         # 只找出未翻译的tag
         res = dbexecute('''
@@ -662,29 +669,28 @@ def fetch_translated_tag_m(th_count) -> list:
         logger.info(f'创建线程池，线程数量: {th_count}')
 
         with ThreadPoolExecutor(max_workers=th_count) as pool:
+            tags_caught_exception = []
             all_th = [pool.submit(fetch_translated_tag_i, j, len(jptags)) for j in jptags]
 
             for th in tqdm(as_completed(all_th), total=len(all_th)):
-                if th.exception():
-                    logger.error(f'运行时出现错误: {th.exception()}')
-                
+                if th.result() is not None:
+                    tags_caught_exception.append(th.result())
 
             # 读取文件
             logger.debug('tag翻译完成，从文件中读取结果')
             with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
                 lines = f.readlines()
-                for line in lines:
-                    dic = eval(line)
-                    result.append(dic)
                 f.close()
 
             s = 0
-            for r in result:
-                if type(r) != type(None):
-                    if r.keys == r.values:  # 根据子线程出现无翻译时的操作进行判断
+            for r in lines:
+                r: dict = eval(r)
+                if r is not None:
+                    if list(r.keys()) == list(r.values()):  # 根据子线程出现无翻译时的操作进行判断
                         s += 1
             
-            logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
+            logger.info(f'tag翻译获取完成, 共 {len(jptags)} 个, 无翻译 {s} 个，错误 {len(jptags) - len(result)} 个')
+            logger.info(f'发生错误的tag {tags_caught_exception}')
     except Exception:
         result = handle_exception(logger, inspect.currentframe().f_code.co_name)
     return result
@@ -845,7 +851,7 @@ def main():
                 f.write('')
                 f.close()
 
-        print('请选择模式: 1-更新tags至本地数据库    2-基于本地数据库进行插画搜索   3-同步上次运行时获取的有效数据（若有）  4-退出')
+        print(mode_select)
         mode = input('模式 = ')
         if mode == '1':
             start = time.time()
@@ -978,8 +984,9 @@ def main():
                 f.close()
             s = 0
             for r in result:
-                if type(r) != type(None):
-                    if r.keys == r.values:
+                if r is not None:
+                    r: dict
+                    if list(r.keys()) == list(r.values()):
                         s += 1
             logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
             write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS, result)
@@ -995,4 +1002,5 @@ def main():
         print('')
 
 if __name__ == "__main__":
-    main()
+    #main()
+    fetch_translated_tag_i('花')
