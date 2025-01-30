@@ -1,5 +1,6 @@
-# PIXIVTAGS Version 1.0
+# PixivTags Version 1.0
 # 
+# AUTHOR: zch9241
 # 
 # COPYRIGHT NOTICE  
 # 
@@ -27,6 +28,7 @@ import inspect
 import json
 import logging
 import os
+import pdb
 import re
 import shutil
 import sqlite3
@@ -74,7 +76,8 @@ mode_select = """
 4 = 退出
 """
 reserve_words = {'help': '_help()', 'exit': '_exit()',
-                 'search': '_search()', 'list': '_list()', 'hot': '_hot()'}
+                 'search': '_search()', 'list': '_list()', 'hot': '_hot()',
+                 'debug': '_debug()'}
 help_text = """
 这是交互模式的使用说明
 `help`: 显示帮助
@@ -142,7 +145,7 @@ def get_cookies(rtime: int, forced = False):
             modify_time = 0
     relative_time = time.time() - modify_time
     
-    if relative_time < rtime and relative_time > 0 and forced == False:
+    if relative_time < rtime and relative_time > 0 and forced is False:
         logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
     else:
         logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
@@ -205,9 +208,9 @@ def dbexecute(query, params=None, many=False):
         conn = sqlite3.connect(SQLPATH)  
         cursor = conn.cursor()  
         try:
-            if many==True and type(params) == list:
+            if many is True and type(params) == list:
                 cursor.executemany(query, params or ())
-            elif type(params) == tuple or params == None:
+            elif type(params) == tuple or params is None:
                 cursor.execute(query, params or ()) 
             else:
                  raise Exception("传入的params类型校验错误")
@@ -241,16 +244,23 @@ def var_check(*args):
             return True
 
 
-def handle_exception(logger, func_name):
+def handle_exception(logger: logging.Logger, func_name: str = None):
+    """对抛出错误的通用处理
+
+    Args:
+        logger (logging.Logger): logger
+        func_name (str, optional): 抛出错误的函数名(配合var_check()使用). Defaults to None.
+    """
     exc_type, exc_value, tb = sys.exc_info()
-    logger.error(f'错误 {exc_type.__name__}: {exc_value}')
+    logger.error(f'{exc_type.__name__}: {exc_value}')
     
     # 获取完整的堆栈跟踪信息
     tb_list = traceback.format_tb(tb)
     ex = "".join(tb_list)
     logger.error(ex)
-
-    return f'ERROR {func_name}'
+    
+    if func_name:
+        return f'ERROR {func_name}'
 
 
 def analyse_bookmarks(rest_flag=2, limit=100) -> list:
@@ -360,7 +370,7 @@ def analyse_illusts_i(url) -> list:
 
             idata = resp['body']['works']
             for ildata in idata:
-                if ildata['isMasked'] == True:
+                if ildata['isMasked'] is True:
                     tqdm.write(f"INFO 此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
                     ignores += 1
                 else:
@@ -579,6 +589,7 @@ def fetch_translated_tag_i(j, priority=None):
     - `priority`: 语言优先级
     '''
     priority = ['zh', 'en', 'zh_tw']
+    get_exception = False
     # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
     jf = parse.quote(j, safe='')
 
@@ -587,6 +598,7 @@ def fetch_translated_tag_i(j, priority=None):
         '''
         count: 规定最大递归深度
         '''
+        nonlocal get_exception
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
@@ -598,14 +610,21 @@ def fetch_translated_tag_i(j, priority=None):
                     page.locator('body > pre').inner_text()
                 )
                 browser.close()
+
+            # 运行到此处说明运行成功
+            if get_exception is True:   # 函数处于递归中
+                get_exception = False   # 重置状态
+                tqdm.write(f'INFO tag {j} 重试成功')
+
             return resp
         except Exception:
-            tqdm.write(f'ERROR 请求tag接口时出错,重试 {sys.exc_info()}')
+            get_exception = True
+            tqdm.write(f'ERROR tag {j} 请求tag接口时出错,重试 {sys.exc_info()}')
             time.sleep(1)
             if count >= 1:
                 return get(count - 1)
             else:
-                logger.warning('达到最大递归深度')
+                tqdm.write(f'WARNING tag {j} 达到最大递归深度, 放弃')
                 return None
                 
     resp = get(10)
@@ -616,7 +635,7 @@ def fetch_translated_tag_i(j, priority=None):
             f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
             f.write(f'请求tag {j}')
             f.write('\n')
-            f.close()
+            
         tqdm.write('INFO 失败的tag已写入日志')
         return j
     else:
@@ -647,68 +666,132 @@ def fetch_translated_tag_i(j, priority=None):
         
         with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
             f.write(str(result) + '\n')
-            f.close()
-def fetch_translated_tag_m(th_count) -> list:
+            
+def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict]] | str:
+    """从pixiv上爬取tag翻译
+
+    Args:
+        th_count (int): _description_
+        jptags (list): optional, 如果上次调用返回的not_translated_tags值不是空列表
+
+    Raises:
+        ValCheckError: _description_
+
+    Returns:
+        tuple[list[dict], list[dict]] | str: 第一个list是翻译好的tag列表，列表的元素为{'日文tag': '指定语言tag'}；
+                                             第二个list是未翻译好的tag列表，元素就是'日文tag（未翻译）'
+                                             返回str是出exception了
+    """
     logger.info('正在运行')
     signature = inspect.signature(fetch_translated_tag_m)
     for param in signature.parameters.values():
         if var_check(eval(param.name)) == 1:
             raise ValCheckError
     try:
-        jptags = []
+        if jptags == []:
+            # 只找出未翻译的tag
+            res = dbexecute('''
+                        SELECT * FROM tags WHERE transtag == ''
+                        ''')
 
-        # 只找出未翻译的tag
-        res = dbexecute('''
-                    SELECT * FROM tags WHERE transtag == ''
-                    ''')
-
-        for r in res:
-            (jptag, _) = r
-            jptags.append(jptag)
-        logger.info(f'已从数据库获取 {len(jptags)} 个tag')
+            for r in res:
+                (jptag, _) = r
+                jptags.append(jptag)
+            logger.info(f'已从数据库获取 {len(jptags)} 个tag')
+        else:   # 这行本来不用，为了便于理解就加上了，有传入说明是此次调用为重试
+            jptags = jptags
+            logger.info(f'已从参数中获取 {len(jptags) }个tag')
+        
         logger.info(f'创建线程池，线程数量: {th_count}')
 
         with ThreadPoolExecutor(max_workers=th_count) as pool:
+            result = []
             tags_caught_exception = []
-            all_th = [pool.submit(fetch_translated_tag_i, j, len(jptags)) for j in jptags]
+            read_file_exception = []
 
-            for th in tqdm(as_completed(all_th), total=len(all_th)):
-                if th.result() is not None:
-                    tags_caught_exception.append(th.result())
+
+            # 初始化进度条（增加平滑参数）
+            pbar = tqdm(total=len(jptags), smoothing=0.1)
+            # 定义带异常处理的回调函数
+            def handle_completion(future):
+                try:
+                    result = future.result()
+                    if result is not None:
+                        tags_caught_exception.append(result)
+                finally:
+                    pbar.update(1)  # 确保无论成功失败都更新进度
+            # 批量提交任务
+            futures = [pool.submit(fetch_translated_tag_i, j, len(jptags)) for j in jptags]
+            # 绑定回调函数
+            for future in futures:
+                future.add_done_callback(handle_completion)
+            # 等待所有任务完成（同时保持主线程活跃）
+            while not all(f.done() for f in futures):
+                time.sleep(0.1)  # 避免 CPU 空转
+            pbar.close()
 
             # 读取文件
             logger.debug('tag翻译完成，从文件中读取结果')
-            with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
+            with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8', errors = 'replace') as f:
                 lines = f.readlines()
-                f.close()
+            for index, text in enumerate(lines):
+                try:
+                    result.append(eval(text))
+                except Exception as e:
+                    read_file_exception.append(index + 1)
+                    tqdm.write(f'ERROR 读取文件内容时出现错误，已忽略(位于第 {index + 1} 行)')
+                    tqdm.write(str(e))
 
+            # 记录无翻译的tag和未翻译的tag
             s = 0
-            for r in lines:
-                r: dict = eval(r)
+            translated_tags = []
+            for r in result:
+                r: dict
                 if r is not None:
                     if list(r.keys()) == list(r.values()):  # 根据子线程出现无翻译时的操作进行判断
                         s += 1
+                    translated_tags.append(list(r.keys())[0])     # key只有一个
+            set_translated_tags = set(translated_tags)
+            not_translated_tags = [jptag for jptag in jptags if jptag not in set_translated_tags]
             
-            logger.info(f'tag翻译获取完成, 共 {len(jptags)} 个, 无翻译 {s} 个，错误 {len(jptags) - len(result)} 个')
-            logger.info(f'发生错误的tag {tags_caught_exception}')
+            
+            logger.info(f'tag翻译获取完成, 共 {len(jptags)} 个, 无翻译 {s} 个')
+            if len(tags_caught_exception) > 0:
+                logger.info(f'在线程运行时抛出exception的tag {tags_caught_exception}')
+            if len(read_file_exception) > 0:
+                logger.info(f"文件读取时发生错误的行 {read_file_exception}")
+            if len(not_translated_tags) > 0:
+                logger.info(f"总结: 未翻译的tag {not_translated_tags}")
+                logger.info(f"总共 {len(not_translated_tags)} 个")
+
+            if (len(not_translated_tags) == 0 
+                and len(read_file_exception) == 0 
+                and len(tags_caught_exception) == 0):
+                logger.info('总结：翻译无异常')
+            
+            return result, not_translated_tags
     except Exception:
-        result = handle_exception(logger, inspect.currentframe().f_code.co_name)
-    return result
+        return handle_exception(logger, inspect.currentframe().f_code.co_name)
+
 
 
 def write_transtags_to_db_i(tran: dict):
     '''
     `tran`: 需要提交的tags (jp:tr)
     '''
-    if type(tran) == type(None):
-        tqdm.write('ERROR 参数为NoneType类型，忽略')
-    else:
-        transtag = list(tran.values())[0]
-        jptag = list(tran.keys())[0]
-    # 注意sql语句transtag用双引号！
-    # 否则执行sql时会有syntax error
-    dbexecute(
-        f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
+    try:
+        if tran is None:
+            tqdm.write('ERROR 参数为NoneType类型，忽略')
+        else:
+            transtag = list(tran.values())[0]
+            jptag = list(tran.keys())[0]
+        # 注意sql语句transtag用双引号！
+        # 否则执行sql时会有syntax error
+        dbexecute(
+            f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
+    except Exception as e:
+        tqdm.write(sys.exc_info())
+        tqdm.write(f'函数传入参数: {tran}')
 def write_transtags_to_db_m(th_count, trans):
     """提交翻译后的tags
 
@@ -838,18 +921,22 @@ def mapping() -> dict:
 def main():
     while True:
         # 备份并清空上次运行的结果(若有)
-        with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
-            lines = f.readlines()
-            f.close()
-        if lines != []:
-            logger.info('备份上次运行时fetch_translated_tag_i函数的返回值')
-            timestamp = os.path.getmtime(CWD + '\\temp\\result').__round__(0)
-            SrcModifyTime = datetime.datetime.fromtimestamp(timestamp)
-            shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
+        timestamp = os.path.getmtime(CWD + '\\temp\\result').__round__(0)
+        SrcModifyTime = datetime.datetime.fromtimestamp(timestamp)
+        try:
+            with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
+                lines = f.readlines()
+            if lines != []:
+                logger.info('备份上次运行时fetch_translated_tag_i函数的返回值')
 
-            with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
-                f.write('')
-                f.close()
+                shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
+
+                with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
+                    f.write('')
+        except UnicodeDecodeError:
+            logger.error("读取文件时遇到编码错误")
+            logger.info("直接复制文件")
+            shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
 
         print(mode_select)
         mode = input('模式 = ')
@@ -873,9 +960,15 @@ def main():
             writeraw_to_db_m(WRITERAW_TO_DB_THREADS, illdata)
             write_tags_to_db_m(WRITE_TAGS_TO_DB_THREADS)
 
+            count = 0
+            trans, not_trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
+            while not_trans != [] and count <= 10:      # 若翻译出错，则重试
+                logger.info(f'现在重试翻译tags {not_trans} ')
+                trans_added, not_trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS, not_trans)
+                trans.append(trans_added)
+            if not_trans != []:     # 重试之后还是不行
+                logger.warning('达到最大重试次数，放弃')
 
-            trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
-            
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
@@ -909,20 +1002,20 @@ def main():
                         target_keys = get_close_matches(key, keys, n=3, cutoff=0.5)
                         
                         print(f'可能的结果: {target_keys}')
-                        target_key = input('请选择其中一个结果: ')
-                        if not target_key in target_keys:
-                            print('未匹配, 请重新选择: ')
-                            key = ''
+                        try:
+                            target_key_index = int(input('输入元素索引: '))
+                            print(f'pids: {set(list(df[target_keys[target_key_index]].dropna().astype(int).sort_values(ascending = False)))}')
+
+                        except Exception as e:
+                            handle_exception(logger)
                             continue
-                        else:
-                            print(f'pids: {set(list(df[target_key].dropna().astype(int).sort_values(ascending = False)))}')
+
                     elif cmd_key.split(' ')[0] == '-f':
                         key = cmd_key.split(' ')[-1]
                         try:
                             print(f'pids: {set(list(df[key].dropna().astype(int).sort_values(ascending = False)))}')
                         except Exception:
-                            print('出现错误')
-                            print(sys.exc_info())
+                            handle_exception(logger)
                     elif cmd_key.split(' ')[0] == '-c':
                         plist = []      # 存放每次查询返回的结果集合
                         intersection = []   # 取得的交集
@@ -937,14 +1030,15 @@ def main():
                                 target_keys = get_close_matches(k, keys, n=3, cutoff=0.5)
                                 
                                 print(f'可能的结果: {target_keys}')
-                                target_key = input('请选择其中一个结果: ')
-                                if not target_key in target_keys:
-                                    print('未匹配, 请重新选择: ')
-                                    continue
-                                else:
-                                    plist.extend(set(list(df[target_key].dropna().astype(int))))
+                                try:
+                                    target_key_index = int(input('输入元素索引: '))
+                                    plist.extend(set(list(df[target_keys[target_key_index]].dropna().astype(int))))
                                     s += 1
                                     break
+                                except Exception as e:
+                                    handle_exception(logger)
+                                    continue
+
                         for p in set(plist):
                             num = plist.count(p)
                             if num == l:
@@ -963,6 +1057,8 @@ def main():
                 num = int(input())
                 ser = df.count().sort_values(ascending = False).head(num)
                 print(ser)
+            def _debug():
+                print(eval(input('python>')))
             _help()
             while True:
                 print('>>>', end='')
@@ -981,7 +1077,7 @@ def main():
                 for line in lines:
                     dic = eval(line)
                     result.append(dic)
-                f.close()
+                
             s = 0
             for r in result:
                 if r is not None:
@@ -1002,5 +1098,4 @@ def main():
         print('')
 
 if __name__ == "__main__":
-    #main()
-    fetch_translated_tag_i('花')
+    main()
