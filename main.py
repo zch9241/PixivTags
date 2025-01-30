@@ -4,7 +4,7 @@
 # 
 # COPYRIGHT NOTICE  
 # 
-# Copyright (c) 2024, zch9241. All rights reserved.  
+# Copyright (c) 2024-2025, zch9241. All rights reserved.  
 # 
 # This source code is provided "AS IS" without any warranty of any kind.  
 # You may use this source code for any purpose, provided that you do not violate any applicable laws or regulations. 
@@ -15,7 +15,6 @@
 # 
 
 # TODO:
-# 增加进度条预计时间精准度
 # 优化查询功能
 
 
@@ -72,7 +71,7 @@ mode_select = """
 请选择模式: 
 1 = 更新tags至本地数据库
 2 = 基于本地数据库进行插画搜索
-3 = 向本地数据库提交上次运行时备份的有效数据(在程序报错时使用)
+3 = 向本地数据库提交历史运行时备份的有效数据(在程序报错时使用)
 4 = 退出
 """
 reserve_words = {'help': '_help()', 'exit': '_exit()',
@@ -121,12 +120,36 @@ CREATE TABLE IF NOT EXISTS "removed" (
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS "tags" (
 	"jptag"	TEXT,
-	"transtag"	TEXT
-);
+	"transtag"	TEXT,
+	UNIQUE("jptag")
+)
                ''')
 conn.commit()
 cursor.close()
 conn.close()
+
+def handle_exception(logger: logging.Logger, func_name: str = None, in_bar = True):
+    """对抛出错误的通用处理
+
+    Args:
+        logger (logging.Logger): logger
+        func_name (str, optional): 抛出错误的函数名(配合var_check()使用). Defaults to None.
+        in_bar(bool, optional): 原函数中是否打印进度条(tqdm)，防止输出错乱. Defaults to True.
+    """
+    exc_type, exc_value, tb = sys.exc_info()
+    # 获取完整的堆栈跟踪信息
+    tb_list = traceback.format_tb(tb)
+    ex = "".join(tb_list)
+    
+    if in_bar == True:
+        tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
+        tqdm.write(f'ERROR {ex}')
+    else:
+        logger.error(f'{exc_type.__name__}: {exc_value}')
+        logger.error(ex)
+
+    if func_name:
+        return f'ERROR {func_name}'
 
 # 获取cookies
 def get_cookies(rtime: int, forced = False):
@@ -192,13 +215,13 @@ def get_cookies(rtime: int, forced = False):
 
 # 数据库相关操作
 db_lock = threading.Lock()
-def dbexecute(query, params=None, many=False):  
+def dbexecute(query: str, params: tuple|list[tuple]=None, many=False):  
     """数据库操作
 
     Args:
         query (str): sql命令
-        params (tuple|list, optional): 查询参数. Defaults to None.
-        many (bool, optional): 是否对多行数据进行操作,若将参数设为True,请确保传入的query为列表类型. Defaults to False.
+        params (tuple|list[tuple], optional): 查询参数. Defaults to None.
+        many (bool, optional): 是否对多行数据进行操作,若将参数设为True,请确保传入的params为list[tuple]类型. Defaults to False.
 
     Returns:
         list|None: 查询结果（若有）
@@ -208,7 +231,7 @@ def dbexecute(query, params=None, many=False):
         conn = sqlite3.connect(SQLPATH)  
         cursor = conn.cursor()  
         try:
-            if many is True and type(params) == list:
+            if many is True and type(params) == list and all(isinstance(item, tuple) for item in params):   # 验证list[tuple]
                 cursor.executemany(query, params or ())
             elif type(params) == tuple or params is None:
                 cursor.execute(query, params or ()) 
@@ -216,8 +239,8 @@ def dbexecute(query, params=None, many=False):
                  raise Exception("传入的params类型校验错误")
             conn.commit()  
             res = cursor.fetchall()
-        except sqlite3.Error as e:  
-            print(f"Database error: {e}")  
+        except Exception:
+            handle_exception(logger, inspect.currentframe().f_code.co_name)
             conn.rollback()  
         finally:  
             cursor.close()  
@@ -242,25 +265,6 @@ def var_check(*args):
             position = str(var).split(' ')[1]
             logger.error(f'上个函数在执行中出现错误 所在函数:{position}')
             return True
-
-
-def handle_exception(logger: logging.Logger, func_name: str = None):
-    """对抛出错误的通用处理
-
-    Args:
-        logger (logging.Logger): logger
-        func_name (str, optional): 抛出错误的函数名(配合var_check()使用). Defaults to None.
-    """
-    exc_type, exc_value, tb = sys.exc_info()
-    logger.error(f'{exc_type.__name__}: {exc_value}')
-    
-    # 获取完整的堆栈跟踪信息
-    tb_list = traceback.format_tb(tb)
-    ex = "".join(tb_list)
-    logger.error(ex)
-    
-    if func_name:
-        return f'ERROR {func_name}'
 
 
 def analyse_bookmarks(rest_flag=2, limit=100) -> list:
@@ -350,41 +354,43 @@ def analyse_illusts_i(url) -> list:
     - `url`: 接口URL
     - `:return`: 插画信息的列表, 忽略的插画数量
     '''
+    try:
+        illustdata = []
+        ignores = 0
+        def inner(count):
+            nonlocal ignores, illustdata
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
+                    context = browser.new_context(storage_state=COOKIE_PATH)
+                    page = context.new_page()
 
-    illustdata = []
-    ignores = 0
-    def inner(count):
-        nonlocal ignores, illustdata
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
-                context = browser.new_context(storage_state=COOKIE_PATH)
-                page = context.new_page()
+                    page.goto(url)
+                    # 解析每张插画的信息，添加到列表
+                    resp: dict = json.loads(
+                        page.locator('body > pre').inner_text())
+                    
+                    browser.close()
 
-                page.goto(url)
-                # 解析每张插画的信息，添加到列表
-                resp: dict = json.loads(
-                    page.locator('body > pre').inner_text())
-                
-                browser.close()
-
-            idata = resp['body']['works']
-            for ildata in idata:
-                if ildata['isMasked'] is True:
-                    tqdm.write(f"INFO 此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
-                    ignores += 1
+                idata = resp['body']['works']
+                for ildata in idata:
+                    if ildata['isMasked'] is True:
+                        tqdm.write(f"INFO 此插画已被隐藏，忽略本次请求 pid = {ildata['id']}")
+                        ignores += 1
+                    else:
+                        illustdata.append(ildata)
+            except Exception:
+                handle_exception(logger, inspect.currentframe().f_code.co_name)
+                tqdm.write('INFO 重试')
+                if count >= 1:
+                    inner(count - 1)
                 else:
-                    illustdata.append(ildata)
-        except Exception:
-            handle_exception(logger, inspect.currentframe().f_code.co_name)
-            tqdm.write('INFO 重试')
-            if count >= 1:
-                inner(count - 1)
-            else:
-                tqdm.write('WARNING 达到最大递归深度')
-    inner(10)
-        
-    return illustdata, ignores
+                    tqdm.write('WARNING 达到最大递归深度')
+        inner(10)
+            
+        return illustdata, ignores
+    except Exception as e:
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 def analyse_illusts_m(th_count, urls) -> list:
     '''
     analyse_illusts_i的主线程, 整合信息
@@ -426,48 +432,51 @@ def writeraw_to_db_i(illdata) -> list:
     '''
     `:return`: 状态
     '''
-    # 新数据
-    pid = int(illdata['id'])
-    jptag = str(illdata['tags'])
-    transtag = '0'
-    is_translated = 0
-    is_private = int(illdata['bookmarkData']['private'])
+    try:
+        # 新数据
+        pid = int(illdata['id'])
+        jptag = str(illdata['tags'])
+        transtag = '0'
+        is_translated = 0
+        is_private = int(illdata['bookmarkData']['private'])
 
-    # 先查询已有信息，再判断是否需要修改
-    sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
-    query_result: list = dbexecute(sql)
-    # 比较信息, 将不同之处添加至修改位置列表
-    if query_result == []:     # 无信息
-        # logger.debug('添加新信息')
-        
-        #sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
-        dbexecute(f"INSERT INTO illusts (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
-        status = ['0']
+        # 先查询已有信息，再判断是否需要修改
+        sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
+        query_result: list = dbexecute(sql)
+        # 比较信息, 将不同之处添加至修改位置列表
+        if query_result == []:     # 无信息
+            # logger.debug('添加新信息')
+            
+            #sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
+            dbexecute(f"INSERT INTO illusts (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
+            status = ['0']
 
-    else:     # 有信息
-        # 查询table_info，并从返回值中获取列名
-        db_columns = [column_data[1] for column_data in dbexecute('PRAGMA table_info(illusts)')]
-        necessary_columns = ['jptag', 'is_private']
-        
-        # 格式化数据
-        newdata = {'jptag': jptag, 'is_private': is_private}
-        olddata_ = {}
-        olddata: tuple = query_result[0]
-        for i in range(len(olddata)):
-            if db_columns[i] in necessary_columns:
-                olddata_[db_columns[i]] = olddata[i]
-        
-        if newdata == olddata_:
-            # logger.debug('数据重复，无需添加')
-            status = ['1']
-        else:
-            if olddata_['jptag'] != newdata['jptag']:   # 插画添加了新的tag，删除旧的翻译，更新翻译状态
-                dbexecute('UPDATE illusts SET jptag = ?, transtag = ?, is_translated = ?, is_private = ? WHERE pid = ?',(jptag, '0', 0, is_private, pid))
-            else:   # 用户修改了插画隐藏属性
-                dbexecute('UPDATE illusts SET is_private = ? WHERE pid = ?', (is_private, pid))
-            status = ['2']
+        else:     # 有信息
+            # 查询table_info，并从返回值中获取列名
+            db_columns = [column_data[1] for column_data in dbexecute('PRAGMA table_info(illusts)')]
+            necessary_columns = ['jptag', 'is_private']
+            
+            # 格式化数据
+            newdata = {'jptag': jptag, 'is_private': is_private}
+            olddata_ = {}
+            olddata: tuple = query_result[0]
+            for i in range(len(olddata)):
+                if db_columns[i] in necessary_columns:
+                    olddata_[db_columns[i]] = olddata[i]
+            
+            if newdata == olddata_:
+                # logger.debug('数据重复，无需添加')
+                status = ['1']
+            else:
+                if olddata_['jptag'] != newdata['jptag']:   # 插画添加了新的tag，删除旧的翻译，更新翻译状态
+                    dbexecute('UPDATE illusts SET jptag = ?, transtag = ?, is_translated = ?, is_private = ? WHERE pid = ?',(jptag, '0', 0, is_private, pid))
+                else:   # 用户修改了插画隐藏属性
+                    dbexecute('UPDATE illusts SET is_private = ? WHERE pid = ?', (is_private, pid))
+                status = ['2']
 
-    return status
+        return status
+    except Exception as e:
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 def writeraw_to_db_m(th_count, illdata):
     """将插画tag,是否隐藏等属性提交至数据库
 
@@ -507,8 +516,6 @@ def writeraw_to_db_m(th_count, illdata):
             wait(all_th, return_when=ALL_COMPLETED)
             for th in tqdm(as_completed(all_th), total = len(all_th)):
                 result.extend(th.result())
-                if th.exception():
-                    logger.error(f'运行时出现错误: {th.exception()}')
             logger.info(
                 f"所有线程运行完成, 添加: {result.count('0')}  修改: {result.count('2')}  跳过: {result.count('1')}")
     except Exception:
@@ -525,7 +532,7 @@ def write_tags_to_db_i(tag) -> list:
     # 提交元素
     try:
         cur.execute(f'''
-                INSERT INTO tags VALUES ('{tag}','')
+                INSERT OR IGNORE INTO tags VALUES ('{tag}','')
                 ''')
         con.commit()
         status = ['0']
@@ -539,7 +546,10 @@ def write_tags_to_db_i(tag) -> list:
     return status
 def write_tags_to_db_m(th_count):
     '''
+    # DEPRECATED
     提交原始tags
+    
+    能用，但是低效
     '''
     logger.info('正在运行')
     signature = inspect.signature(write_tags_to_db_m)
@@ -554,12 +564,11 @@ def write_tags_to_db_m(th_count):
             result = []
 
             res = dbexecute('''
-                    SELECT * FROM illusts WHERE is_translated = 0
-                    ''')    # 数据结构: [(行1), (行2), ...], 每行: (值1, ...)
+                    SELECT jptag FROM illusts
+                    ''')
 
-            for r in res:
-                il_tag = eval(r[1])  # 单双引号问题, 不能用json.loads()
-                tags.extend(il_tag)
+            [tags.extend(eval(r)) for r in res]     # 单双引号问题, 不能用json.loads()
+            
             # 移除重复元素
             tags = list(set(tags))
             if len(tags) == 0:
@@ -579,12 +588,47 @@ def write_tags_to_db_m(th_count):
     except Exception:
         handle_exception(logger, inspect.currentframe().f_code.co_name)
 
+def write_rawtags_to_db():
+    """
+    从数据库中获取所有插画的原始tag，并提交到tags的jptags列
+    
+    （仅新tag,即还未翻译的tag）
+    """
+    try:
+        logger.info('正在运行')
+        
+        old_count = dbexecute('SELECT count(*) FROM tags')[0][0]
+        
+        illust_tags_raw: list[tuple] = dbexecute('SELECT jptag FROM illusts')
+        illust_tags = []
+
+        for raw in illust_tags_raw:
+            # 由于每张插画都有tag，得把他们全都拆出来
+            illust_tag = [tag for tag in eval(raw[0])]
+            illust_tags.extend(illust_tag)
+        
+        # 去重
+        illust_tags = list(set(illust_tags))
+        illust_tags = [(tag,) for tag in illust_tags]
+        logger.info(f'从表illust中获取到 {len(illust_tags)} 个tag(去重后)')
+
+        sql = 'INSERT INTO tags(jptag) VALUES (?) ON CONFLICT DO NOTHING'
+        dbexecute(sql, illust_tags, many = True)
+        
+        new_count = dbexecute('SELECT count(*) FROM tags')[0][0]
+        
+        logger.info(f'向数据库提交了未翻译的tag，增加了{new_count - old_count} 行')
+    except Exception as e:
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 def fetch_translated_tag_i(j, priority=None):
     '''
-    发送请求获取翻译后的tag \n
-    最终将返回值写入.temp/result文件 \n
-    返回值为失败的tag or None \n
+    发送请求获取翻译后的tag
+    
+    最终将返回值写入.temp/result文件
+    
+    返回值为失败的tag or None
+    
     - `j`: tag的名称
     - `priority`: 语言优先级
     '''
@@ -666,7 +710,6 @@ def fetch_translated_tag_i(j, priority=None):
         
         with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
             f.write(str(result) + '\n')
-            
 def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict]] | str:
     """从pixiv上爬取tag翻译
 
@@ -691,7 +734,7 @@ def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict
         if jptags == []:
             # 只找出未翻译的tag
             res = dbexecute('''
-                        SELECT * FROM tags WHERE transtag == ''
+                        SELECT * FROM tags WHERE transtag is NULL
                         ''')
 
             for r in res:
@@ -743,6 +786,7 @@ def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict
                     tqdm.write(str(e))
 
             # 记录无翻译的tag和未翻译的tag
+            # 无翻译指的是pixiv上没有对应的翻译，未翻译是程序出现错误
             s = 0
             translated_tags = []
             for r in result:
@@ -820,24 +864,27 @@ def write_transtags_to_db_m(th_count, trans):
 
 
 def transtag_return_i(r0):
-    pid, jptag0 = r0[0], r0[1]
-    jptags = eval(jptag0)
-    l = [''] * len(jptags)
-    for i in range(len(jptags)):
-        resp = dbexecute('''
-                    SELECT * FROM tags
+    try:
+        pid, jptag0 = r0[0], r0[1]
+        jptags = eval(jptag0)
+        l = [''] * len(jptags)
+        for i in range(len(jptags)):
+            resp = dbexecute('''
+                        SELECT * FROM tags
+                        ''')
+            for r in resp:
+                jptag, transtag = r
+                if jptag == jptags[i]:
+                    l[i] = base64.b64encode(transtag.encode('utf-8'))
+        dbexecute(f'''
+                    UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
                     ''')
-        for r in resp:
-            jptag, transtag = r
-            if jptag == jptags[i]:
-                l[i] = base64.b64encode(transtag.encode('utf-8'))
-    dbexecute(f'''
-                UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
-                ''')
-    dbexecute(f'''
-                UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
-                ''')
-    # logger.debug(l)
+        dbexecute(f'''
+                    UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
+                    ''')
+        # logger.debug(l)
+    except Exception as e:
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
 def transtag_return_m(th_count):
     '''
     上传翻译后的tags至表illust
@@ -856,8 +903,7 @@ def transtag_return_m(th_count):
             
             all_th = [pool.submit(transtag_return_i, r0) for r0 in resp0]
             for th in tqdm(as_completed(all_th), total=len(all_th)):
-                if th.exception():
-                    logger.error(f'运行时出现错误: {th.exception()}')
+                pass
         logger.info('翻译后的tag已提交至表illust')
     except Exception:
         handle_exception(logger, inspect.currentframe().f_code.co_name)
@@ -958,7 +1004,7 @@ def main():
 
 
             writeraw_to_db_m(WRITERAW_TO_DB_THREADS, illdata)
-            write_tags_to_db_m(WRITE_TAGS_TO_DB_THREADS)
+            write_rawtags_to_db()
 
             count = 0
             trans, not_trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
@@ -1072,12 +1118,17 @@ def main():
         elif mode == '3':
             # 此段代码参考fetch_translated_tag_m函数
             result = []
-            with open(CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'), 'r', encoding = 'utf-8') as f:
-                lines = f.readlines()
-                for line in lines:
-                    dic = eval(line)
-                    result.append(dic)
-                
+            history_file_name = input('输入历史记录文件名(位于/history目录下，格式为: xxxx-xx-xx xx-xx-xx)')
+            history_file_path = CWD + '\\temp\\history\\' + history_file_name
+            if os.path.exists(history_file_path):
+                with open(history_file_path, 'r', encoding = 'utf-8') as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        dic = eval(line)
+                        result.append(dic)
+            else:
+                logger.warning(f'指定的文件不存在 {history_file_path}')
+            
             s = 0
             for r in result:
                 if r is not None:
@@ -1094,7 +1145,7 @@ def main():
             logger.info('程序退出')
             break
         else:
-            print('未知的指令')
+            print(f'未知的指令 {mode}')
         print('')
 
 if __name__ == "__main__":
