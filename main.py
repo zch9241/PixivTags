@@ -16,6 +16,8 @@
 
 # TODO:
 # 优化查询功能
+# 为插画添加更多元数据
+# 异步
 
 
 # standard-libs
@@ -194,7 +196,7 @@ def get_cookies(rtime: int, forced = False):
                 proc = find_process(name)
         kill_process("chrome.exe")
 
-        # 解密cookies
+        # 获取cookies
         with sync_playwright() as p:
             browser = p.chromium.launch_persistent_context(headless=True,
                 executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',
@@ -207,7 +209,7 @@ def get_cookies(rtime: int, forced = False):
                 f.write(json.dumps(state))
             # 关闭浏览器
             browser.close()
-        logger.info('解密完成')
+        logger.info('cookies已获取')
         # 更新获取cookie的时间
         with open(COOKIE_TIME_PATH, "w") as f:
             f.write(str(time.time()))
@@ -738,7 +740,7 @@ def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict
                         ''')
 
             for r in res:
-                (jptag, _) = r
+                jptag = r[0]
                 jptags.append(jptag)
             logger.info(f'已从数据库获取 {len(jptags)} 个tag')
         else:   # 这行本来不用，为了便于理解就加上了，有传入说明是此次调用为重试
