@@ -15,7 +15,7 @@ import sys
 import threading
 import traceback
 from urllib import parse
-
+import time
 
 from src import config
 
@@ -131,7 +131,7 @@ async def fetch_tag(session: playwright.async_api.APIRequestContext, tag: str, r
                 return (tag, {"error": sys.exc_info()})
             await asyncio.sleep(0.5 * (attempt + 1))
 
-async def worker(session: playwright.async_api.APIRequestContext, queue: asyncio.Queue, results: list, pbar: tqdm):
+async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, queue: asyncio.Queue, results: list, pbar: tqdm):
     while True:
         jptag = await queue.get()
         try:
@@ -144,9 +144,17 @@ async def worker(session: playwright.async_api.APIRequestContext, queue: asyncio
         finally:
             queue.task_done()
 
-async def fetch_translated_tag_main(jptags: list = [], max_concurrency = 20) -> list[tuple[str, dict]]:
+async def fetch_translated_tag_main(jptags: list = [], priority: list = [], max_concurrency = 20) -> tuple[list, list]:
     """
-    获取pixiv上的tag翻译
+    ## 获取pixiv上的tag翻译
+    
+    ### args:
+    - jptags: 要获取翻译的原始tag列表
+    - priority: 翻译语言优先级列表（优先级递减）
+    - max_concurrency: 最大协程数量
+    
+    ### returns:
+    (tuple)包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
     """
     priority = ['zh', 'en', 'zh_tw']
     logger.info('正在运行')
@@ -186,7 +194,7 @@ async def fetch_translated_tag_main(jptags: list = [], max_concurrency = 20) -> 
             
             with tqdm(total=len(jptags), desc="采集进度") as pbar:
                 workers = [
-                    asyncio.create_task(worker(session, queue, results, pbar))
+                    asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
                     for _ in range(min(max_concurrency, len(jptags)))
                 ]
 
@@ -197,7 +205,8 @@ async def fetch_translated_tag_main(jptags: list = [], max_concurrency = 20) -> 
             
             await context.close()
             await browser.close()
-            
+        
+        translation_results = []
         tags_caught_exception = []
         for tag, resp in results:
             if resp['error'] is not False:
@@ -227,9 +236,33 @@ async def fetch_translated_tag_main(jptags: list = [], max_concurrency = 20) -> 
                         result = {tag: tag}
                     else:
                         result = {tag: transtag}
-        return result
+                translation_results.append(result)
+                
+        return translation_results, tags_caught_exception
     except Exception as e:
         return handle_exception(logger, inspect.currentframe().f_code.co_name)
 
-result = asyncio.run(fetch_translated_tag_main(['ブルーアーカイブ']))
-a=0
+def fetch_translated_tag_gather(retry = 10):
+    '''
+    ## 获取并整合翻译tag
+    '''
+    count = 0
+    trans, not_trans = asyncio.run(fetch_translated_tag_main())
+    while count < retry:
+        if not_trans == []:
+            break
+        else:
+            logger.info(f'在翻译过程中出现了错误，共 {len(not_trans)} 个')
+            logger.info(f'重试...({count + 1}/{retry})')
+            trans_, not_trans = asyncio.run(fetch_translated_tag_main(not_trans))
+            trans.append(trans_)
+        count += 1
+    if not_trans != []:     # 重试后还是未能获取
+        with open(TAG_LOG_PATH, 'a', encoding = 'utf-8') as f:
+            f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
+            f.write(f'请求tag {not_trans}')
+            f.write('\n')
+        logger.warning('达到最大重试次数，但仍有部分tag未能翻译，失败的结果已写入log')
+    logger.info(f'INFO 翻译完成，成功:{len(trans)}  失败:{len(not_trans)}')
+    return trans
+

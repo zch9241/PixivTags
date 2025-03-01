@@ -17,10 +17,11 @@
 # TODO:
 # 优化查询功能
 # 为插画添加更多元数据
-# 异步
+# 优化数据库查询函数
 
 
 # standard-libs
+import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor, wait, as_completed, ALL_COMPLETED
 import datetime
@@ -41,9 +42,12 @@ from urllib import parse
 
 # site-packages
 import pandas as pd
+from playwright.async_api import async_playwright
+import playwright.async_api
 from playwright.sync_api import sync_playwright
 import psutil
 from tqdm import tqdm
+from tqdm.asyncio import tqdm as async_tqdm
 from win10toast import ToastNotifier
 
 
@@ -279,10 +283,7 @@ def analyse_bookmarks(rest_flag=2, limit=100) -> list:
     - `limit`: 每次获取的pid数目 (= 1,2,3,...,100) [默认为100(最大)]
     '''
     logger.info('正在运行')
-    signature = inspect.signature(analyse_bookmarks)
-    for param in signature.parameters.values():
-        if var_check(eval(param.name)) == 1:
-            raise ValCheckError
+
     try:
         rest_dict = {0: ['show'], 1: ['hide'], 2: ['show', 'hide']}
         rest = rest_dict[rest_flag]
@@ -438,42 +439,30 @@ def writeraw_to_db_i(illdata) -> list:
         # 新数据
         pid = int(illdata['id'])
         jptag = str(illdata['tags'])
-        transtag = '0'
         is_translated = 0
         is_private = int(illdata['bookmarkData']['private'])
 
         # 先查询已有信息，再判断是否需要修改
-        sql = f'''SELECT * FROM illusts WHERE pid = {pid}'''
+        sql = f'''SELECT pid, jptag, is_translated, is_private FROM illusts WHERE pid = {pid}'''
         query_result: list = dbexecute(sql)
+        
         # 比较信息, 将不同之处添加至修改位置列表
         if query_result == []:     # 无信息
             # logger.debug('添加新信息')
             
-            #sql = f'''INSERT INTO illusts VALUES ({pid},"{jptag}",{transtag},{is_translated},{is_private})'''
-            dbexecute(f"INSERT INTO illusts (pid, jptag, transtag, is_translated, is_private) VALUES (?, ?, ?, ?, ?)", (pid, jptag, transtag, is_translated, is_private))
+            dbexecute(f"INSERT INTO illusts (pid, jptag, is_translated, is_private) VALUES (?, ?, ?, ?)", (pid, jptag, is_translated, is_private))
             status = ['0']
 
         else:     # 有信息
-            # 查询table_info，并从返回值中获取列名
-            db_columns = [column_data[1] for column_data in dbexecute('PRAGMA table_info(illusts)')]
-            necessary_columns = ['jptag', 'is_private']
-            
             # 格式化数据
             newdata = {'jptag': jptag, 'is_private': is_private}
-            olddata_ = {}
-            olddata: tuple = query_result[0]
-            for i in range(len(olddata)):
-                if db_columns[i] in necessary_columns:
-                    olddata_[db_columns[i]] = olddata[i]
-            
-            if newdata == olddata_:
+            olddata = {'jptag': query_result[0][1], 'is_private': query_result[0][3]}
+
+            if newdata == olddata:
                 # logger.debug('数据重复，无需添加')
                 status = ['1']
             else:
-                if olddata_['jptag'] != newdata['jptag']:   # 插画添加了新的tag，删除旧的翻译，更新翻译状态
-                    dbexecute('UPDATE illusts SET jptag = ?, transtag = ?, is_translated = ?, is_private = ? WHERE pid = ?',(jptag, '0', 0, is_private, pid))
-                else:   # 用户修改了插画隐藏属性
-                    dbexecute('UPDATE illusts SET is_private = ? WHERE pid = ?', (is_private, pid))
+                dbexecute('UPDATE illusts SET jptag = ?, is_translated = ?, is_private = ? WHERE pid = ?', (jptag, 0, is_private, pid))
                 status = ['2']
 
         return status
@@ -524,72 +513,6 @@ def writeraw_to_db_m(th_count, illdata):
         handle_exception(logger, inspect.currentframe().f_code.co_name)
 
 
-def write_tags_to_db_i(tag) -> list:
-    '''
-    提交所有未翻译的jptag
-    `:return`: 状态
-    '''
-    con = sqlite3.connect(SQLPATH)
-    cur = con.cursor()
-    # 提交元素
-    try:
-        cur.execute(f'''
-                INSERT OR IGNORE INTO tags VALUES ('{tag}','')
-                ''')
-        con.commit()
-        status = ['0']
-    except sqlite3.IntegrityError as e:
-        # logger.debug(f'出现重复tag: {e}', exc_info = True)
-        status = ['1']
-    except Exception:
-        tqdm.write(f'ERROR 数据库操作错误，重试: {sys.exc_info()}')
-        status = write_tags_to_db_i(tag)
-    con.close()
-    return status
-def write_tags_to_db_m(th_count):
-    '''
-    # DEPRECATED
-    提交原始tags
-    
-    能用，但是低效
-    '''
-    logger.info('正在运行')
-    signature = inspect.signature(write_tags_to_db_m)
-    for param in signature.parameters.values():
-        if var_check(eval(param.name)) == 1:
-            raise ValCheckError
-    try:
-        logger.info(f'创建线程池，线程数量: {th_count}')
-        with ThreadPoolExecutor(max_workers=th_count) as pool:
-            tags = []
-            all_th = []
-            result = []
-
-            res = dbexecute('''
-                    SELECT jptag FROM illusts
-                    ''')
-
-            [tags.extend(eval(r)) for r in res]     # 单双引号问题, 不能用json.loads()
-            
-            # 移除重复元素
-            tags = list(set(tags))
-            if len(tags) == 0:
-                logger.info('没有需要写入的tag')
-
-            while len(tags) > 0:
-                tag = tags.pop(0)
-                all_th.append(pool.submit(write_tags_to_db_i, tag))
-            wait(all_th, return_when=ALL_COMPLETED)
-            for th in tqdm(as_completed(all_th), total = len(all_th)):
-                result.extend(th.result())
-
-                if th.exception():
-                    logger.error(f'运行时出现错误: {th.exception()}')
-            logger.info(
-                f"所有线程运行完成, 添加: {result.count('0')}  跳过: {result.count('1')}")
-    except Exception:
-        handle_exception(logger, inspect.currentframe().f_code.co_name)
-
 def write_rawtags_to_db():
     """
     从数据库中获取所有插画的原始tag，并提交到tags的jptags列
@@ -623,115 +546,58 @@ def write_rawtags_to_db():
     except Exception as e:
         handle_exception(logger, inspect.currentframe().f_code.co_name)
 
-def fetch_translated_tag_i(j, priority=None):
-    '''
-    发送请求获取翻译后的tag
-    
-    最终将返回值写入.temp/result文件
-    
-    返回值为失败的tag or None
-    
-    - `j`: tag的名称
-    - `priority`: 语言优先级
-    '''
-    priority = ['zh', 'en', 'zh_tw']
-    get_exception = False
-    # 转为URL编码, 一定需要加上safe参数, 因为pixiv有些tag有/, 比如: 挟まれたい谷間/魅惑の谷間
-    jf = parse.quote(j, safe='')
-
-
-    def get(count) -> dict | None:
-        '''
-        count: 规定最大递归深度
-        '''
-        nonlocal get_exception
+async def fetch_tag(session: playwright.async_api.APIRequestContext, tag: str, retries=5) -> tuple[str, dict]:
+    encoded_tag = parse.quote(tag, safe = '')
+    url = f"https://www.pixiv.net/ajax/search/tags/{encoded_tag}?lang=zh"
+    for attempt in range(retries):
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
-                context = browser.new_context(storage_state=COOKIE_PATH)
-                page = context.new_page()
-                
-                page.goto(f'https://www.pixiv.net/ajax/search/tags/{jf}?lang=zh')
-                resp: dict = json.loads(
-                    page.locator('body > pre').inner_text()
-                )
-                browser.close()
-
-            # 运行到此处说明运行成功
-            if get_exception is True:   # 函数处于递归中
-                get_exception = False   # 重置状态
-                tqdm.write(f'INFO tag {j} 重试成功')
-
-            return resp
-        except Exception:
-            get_exception = True
-            tqdm.write(f'ERROR tag {j} 请求tag接口时出错,重试 {sys.exc_info()}')
-            time.sleep(1)
-            if count >= 1:
-                return get(count - 1)
-            else:
-                tqdm.write(f'WARNING tag {j} 达到最大递归深度, 放弃')
-                return None
-                
-    resp = get(10)
-
-    if resp is None:
-        tqdm.write(f'WARNING 服务器返回值不正确 此次请求tag: {j}')
-        with open(TAG_LOG_PATH, 'a', encoding = 'utf-8') as f:
-            f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
-            f.write(f'请求tag {j}')
-            f.write('\n')
+            response = await session.get(url)
             
-        tqdm.write('INFO 失败的tag已写入日志')
-        return j
-    else:
-        tagTranslation = resp['body']['tagTranslation']
-        transtag = ''
-        if tagTranslation == []:
-            # print(tagTranslation)
-            tqdm.write(f'INFO 无tag {j} 的翻译')
-            # result = {j: 'None'}
-            result = {j: j}
-        else:
-            trans: dict = tagTranslation[j]  # 包含所有翻译语言的dict
-            lans = trans.keys()
-            for l in priority:
-                if l in lans and trans[l] != '':
-                    transtag = trans[l]
-                    break
-            if transtag == '':
-                av = []
-                for available in trans.values():
-                    if available != '':
-                        # 是否有不用遍历的方法?
-                        [av.append(_) for _ in trans.keys() if trans[_] == available]
-                tqdm.write(f'INFO tag {j} 无目标语言的翻译 & 可用的语言 {av}')
-                result = {j: j}
-            else:
-                result = {j: transtag}
-        
-        with open(CWD + '\\temp\\result', 'a', encoding = 'utf-8') as f:
-            f.write(str(result) + '\n')
-def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict]] | str:
-    """从pixiv上爬取tag翻译
+            if response.status == 429:
+                wait_time = 2 ** (attempt + 1)
+                async_tqdm.write(f"触发限流 [{tag}]，等待 {wait_time} 秒后重试...")
+                await asyncio.sleep(wait_time)
+                continue
+                
+            return (tag, await response.json())
+            
+        except Exception as e:
+            async_tqdm.write(f"请求失败 [{tag}]: {sys.exc_info()}")
+            if attempt == retries - 1:  # 达到最大重试次数
+                return (tag, {"error": sys.exc_info()})
+            await asyncio.sleep(0.5 * (attempt + 1))
 
-    Args:
-        th_count (int): _description_
-        jptags (list): optional, 如果上次调用返回的not_translated_tags值不是空列表
+async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, queue: asyncio.Queue, results: list, pbar: async_tqdm):
+    while True:
+        jptag = await queue.get()
+        try:
+            pbar.set_description(f"Processing {jptag[:10]}...")
+            result: tuple[str, dict] = await fetch_tag(session, jptag)
+            results.append(result)
+            pbar.update(1)
+        except Exception as e:
+            print(sys.exc_info())
+        finally:
+            queue.task_done()
 
-    Raises:
-        ValCheckError: _description_
-
-    Returns:
-        tuple[list[dict], list[dict]] | str: 第一个list是翻译好的tag列表，列表的元素为{'日文tag': '指定语言tag'}；
-                                             第二个list是未翻译好的tag列表，元素就是'日文tag（未翻译）'
-                                             返回str是出exception了
+async def fetch_translated_tag_main(jptags: list = [], priority: list = [], max_concurrency = 20) -> tuple[list, list]:
     """
+    ## 获取pixiv上的tag翻译
+    
+    ### args:
+    - jptags: 要获取翻译的原始tag列表
+    - priority: 翻译语言优先级列表（优先级递减）
+    - max_concurrency: 最大协程数量
+    
+    ### returns:
+    (tuple)包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
+    """
+    priority = ['zh', 'en', 'zh_tw']
     logger.info('正在运行')
-    signature = inspect.signature(fetch_translated_tag_m)
-    for param in signature.parameters.values():
-        if var_check(eval(param.name)) == 1:
-            raise ValCheckError
+    #signature = inspect.signature(fetch_translated_tag_m)
+    #for param in signature.parameters.values():
+    #    if var_check(eval(param.name)) == 1:
+    #        raise ValCheckError
     try:
         if jptags == []:
             # 只找出未翻译的tag
@@ -745,79 +611,101 @@ def fetch_translated_tag_m(th_count, jptags = []) -> tuple[list[dict], list[dict
             logger.info(f'已从数据库获取 {len(jptags)} 个tag')
         else:   # 这行本来不用，为了便于理解就加上了，有传入说明是此次调用为重试
             jptags = jptags
-            logger.info(f'已从参数中获取 {len(jptags) }个tag')
+            logger.info(f'已从参数中获取 {len(jptags)} 个tag')
+    
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=CHROME_PATH
+            )
+            
+            context = await browser.new_context(storage_state=COOKIE_PATH)
+            session = context.request
+            
+            queue = asyncio.Queue()
+            for jptag in jptags:
+                await queue.put(jptag)
+            
+            results = []
+            
+            with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
+                workers = [
+                    asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
+                    for _ in range(min(max_concurrency, len(jptags)))
+                ]
+
+                await queue.join()
+                
+                for w in workers:
+                    w.cancel()
+            
+            await context.close()
+            await browser.close()
         
-        logger.info(f'创建线程池，线程数量: {th_count}')
-
-        with ThreadPoolExecutor(max_workers=th_count) as pool:
-            result = []
-            tags_caught_exception = []
-            read_file_exception = []
-
-
-            # 初始化进度条（增加平滑参数）
-            pbar = tqdm(total=len(jptags), smoothing=0.1)
-            # 定义带异常处理的回调函数
-            def handle_completion(future):
-                try:
-                    result = future.result()
-                    if result is not None:
-                        tags_caught_exception.append(result)
-                finally:
-                    pbar.update(1)  # 确保无论成功失败都更新进度
-            # 批量提交任务
-            futures = [pool.submit(fetch_translated_tag_i, j, len(jptags)) for j in jptags]
-            # 绑定回调函数
-            for future in futures:
-                future.add_done_callback(handle_completion)
-            # 等待所有任务完成（同时保持主线程活跃）
-            while not all(f.done() for f in futures):
-                time.sleep(0.1)  # 避免 CPU 空转
-            pbar.close()
-
-            # 读取文件
-            logger.debug('tag翻译完成，从文件中读取结果')
-            with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8', errors = 'replace') as f:
-                lines = f.readlines()
-            for index, text in enumerate(lines):
-                try:
-                    result.append(eval(text))
-                except Exception as e:
-                    read_file_exception.append(index + 1)
-                    tqdm.write(f'ERROR 读取文件内容时出现错误，已忽略(位于第 {index + 1} 行)')
-                    tqdm.write(str(e))
-
-            # 记录无翻译的tag和未翻译的tag
-            # 无翻译指的是pixiv上没有对应的翻译，未翻译是程序出现错误
-            s = 0
-            translated_tags = []
-            for r in result:
-                r: dict
-                if r is not None:
-                    if list(r.keys()) == list(r.values()):  # 根据子线程出现无翻译时的操作进行判断
-                        s += 1
-                    translated_tags.append(list(r.keys())[0])     # key只有一个
-            set_translated_tags = set(translated_tags)
-            not_translated_tags = [jptag for jptag in jptags if jptag not in set_translated_tags]
-            
-            
-            logger.info(f'tag翻译获取完成, 共 {len(jptags)} 个, 无翻译 {s} 个')
-            if len(tags_caught_exception) > 0:
-                logger.info(f'在线程运行时抛出exception的tag {tags_caught_exception}')
-            if len(read_file_exception) > 0:
-                logger.info(f"文件读取时发生错误的行 {read_file_exception}")
-            if len(not_translated_tags) > 0:
-                logger.info(f"总结: 未翻译的tag {not_translated_tags}")
-                logger.info(f"总共 {len(not_translated_tags)} 个")
-
-            if (len(not_translated_tags) == 0 
-                and len(read_file_exception) == 0 
-                and len(tags_caught_exception) == 0):
-                logger.info('总结：翻译无异常')
-            
-            return result, not_translated_tags
-    except Exception:
+        translation_results = []
+        tags_caught_exception = []
+        for tag, resp in results:
+            if resp['error'] is not False:
+                tags_caught_exception.append(tag)
+            else:
+                tagTranslation = resp['body']['tagTranslation']
+                transtag = ''
+                if tagTranslation == []:
+                    # print(tagTranslation)
+                    # logger.info(f'无tag {tag} 的翻译')
+                    result = {tag: tag}
+                else:
+                    trans: dict = tagTranslation[tag]  # 包含所有翻译语言的dict
+                    lans = trans.keys()
+                    for l in priority:
+                        if l in lans and trans[l] != '':
+                            transtag = trans[l]
+                            break
+                    if transtag == '':
+                        av = []
+                        for available in trans.values():
+                            if available != '':
+                                # 是否有不用遍历的方法?
+                                [av.append(_) for _ in trans.keys() if trans[_] == available]
+                        # logger.info(f'tag {tag} 无目标语言的翻译 & 可用的语言 {av}')
+                        result = {tag: tag}
+                    else:
+                        result = {tag: transtag}
+                translation_results.append(result)
+                
+        return translation_results, tags_caught_exception
+    except Exception as e:
         return handle_exception(logger, inspect.currentframe().f_code.co_name)
+
+def fetch_translated_tag_gather(retries = 10):
+    '''
+    ## 获取并整合翻译tag
+    
+    ### args:
+    - retries: 重试次数
+    
+    ### returns:
+    (list)包含一个jptag-transtag的字典的列表
+    '''
+    count = 0
+    trans, not_trans = asyncio.run(fetch_translated_tag_main())
+    while count < retries:
+        if not_trans == []:
+            break
+        else:
+            logger.info(f'在翻译过程中出现了错误，共 {len(not_trans)} 个')
+            logger.info(f'重试...({count + 1}/{retries})')
+            trans_, not_trans = asyncio.run(fetch_translated_tag_main(not_trans))
+            trans.append(trans_)
+        count += 1
+    if not_trans != []:     # 重试后还是未能获取
+        with open(TAG_LOG_PATH, 'a', encoding = 'utf-8') as f:
+            f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
+            f.write(f'请求tag {not_trans}')
+            f.write('\n')
+        logger.warning('达到最大重试次数，但仍有部分tag未能翻译，失败的结果已写入log')
+    logger.info(f'INFO 翻译完成，成功:{len(trans)}  失败:{len(not_trans)}')
+    return trans
 
 
 
@@ -872,7 +760,7 @@ def transtag_return_i(r0):
         l = [''] * len(jptags)
         for i in range(len(jptags)):
             resp = dbexecute('''
-                        SELECT * FROM tags
+                        SELECT jptag,transtag FROM tags
                         ''')
             for r in resp:
                 jptag, transtag = r
@@ -899,9 +787,7 @@ def transtag_return_m(th_count):
     try:
         logger.info(f'创建线程池，线程数量: {th_count}')
         with ThreadPoolExecutor(max_workers=th_count) as pool:
-            resp0 = dbexecute('''
-                        SELECT * FROM illusts
-                        ''')
+            resp0 = dbexecute('SELECT pid,jptag FROM illusts')
             
             all_th = [pool.submit(transtag_return_i, r0) for r0 in resp0]
             for th in tqdm(as_completed(all_th), total=len(all_th)):
@@ -1008,15 +894,8 @@ def main():
             writeraw_to_db_m(WRITERAW_TO_DB_THREADS, illdata)
             write_rawtags_to_db()
 
-            count = 0
-            trans, not_trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS)
-            while not_trans != [] and count <= 10:      # 若翻译出错，则重试
-                logger.info(f'现在重试翻译tags {not_trans} ')
-                trans_added, not_trans = fetch_translated_tag_m(FETCH_TRANSLATED_TAG_THREADS, not_trans)
-                trans.append(trans_added)
-            if not_trans != []:     # 重试之后还是不行
-                logger.warning('达到最大重试次数，放弃')
 
+            trans = fetch_translated_tag_gather()
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
