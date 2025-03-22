@@ -16,55 +16,41 @@
 
 
 # done:
-# 爬虫函数使用session，提高效率
-# 部分爬虫改为异步，提高效率
-# 修改版权声明
-# 数据库结构修改
-# 数据库交互函数修改（单线程）
+# 一些收尾工作
+# docs:修改readme说明
+# feat:为fetch_translated_tag优化了进度条，现在进度条右侧内容将保持稳定不再跳动
+# feat:完成主要查询功能
 
 
 # standard-libs
 import asyncio
-import base64
-from concurrent.futures import ThreadPoolExecutor, wait, as_completed, ALL_COMPLETED
-import datetime
-from difflib import get_close_matches
 import inspect
 import json
 import logging
 import os
 import pdb
-import re
-import shutil
 import sqlite3
 import sys
-import threading
 import time
 import traceback
 from urllib import parse
 
 # site-packages
-import pandas as pd
 from playwright.async_api import async_playwright
 import playwright.async_api
 from playwright.sync_api import sync_playwright
 import psutil
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
+from wcwidth import wcswidth
 from win10toast import ToastNotifier
 
 
-
+import search
 from src import config
 
 
 # 常量初始化
-ANALYSE_ILLUST_THREADS = config.ANALYSE_ILLUST_THREADS
-WRITERAW_TO_DB_THREADS = config.WRITERAW_TO_DB_THREADS
-WRITE_TAGS_TO_DB_THREADS = config.WRITE_TAGS_TO_DB_THREADS
-FETCH_TRANSLATED_TAG_THREADS = config.FETCH_TRANSLATED_TAG_THREADS
-WRITE_TRANSTAGS_TO_DB_THREADS = config.WRITE_TRANSTAGS_TO_DB_THREADS
-TRANSTAG_RETURN_THREADS = config.TRANSTAG_RETURN_THREADS
 UID = config.UID
 CHROME_PATH = config.CHROME_PATH
 COOKIE_EXPIRED_TIME = config.COOKIE_EXPIRED_TIME
@@ -73,110 +59,101 @@ CWD = os.getcwd()
 SQLPATH = CWD + r'\src\illdata.db'
 COOKIE_PATH = CWD + r'\src\cookies.json'
 COOKIE_TIME_PATH = CWD + r'\src\cookies_modify_time'
-TAG_LOG_PATH = CWD + r'\logs\tag\content.log'
+TAG_LOG_PATH = CWD + r'\logs\err_tags.log'
 
 # 交互模式
 mode_select = """
 请选择模式: 
 1 = 更新tags至本地数据库
 2 = 基于本地数据库进行插画搜索
-3 = 向本地数据库提交历史运行时备份的有效数据(在程序报错时使用)
-4 = 退出
+3 = 退出
 """
-reserve_words = {'help': '_help()', 'exit': '_exit()',
-                 'search': '_search()', 'list': '_list()', 'hot': '_hot()',
-                 'debug': '_debug()'}
-help_text = """
-这是交互模式的使用说明
-`help`: 显示帮助
-`exit`: 退出主程序
-`search`: 搜索tags
-`list`: 列出所有tags(危险操作)
-`hot`: 列出出现最多的tags
+search_introduction = """
+进入搜索模式（回车以退出）
+
+搜索语法：
+NOT: -前缀
+AND: 空格分隔 或 直接输入AND
+OR: 直接输入OR
+特性：
+1. 支持括号
+2. 支持带连字符的标签（如 R-18）
+3. 支持引号包裹的标签
+4. 精准的否定操作符识别
 """
 
-# 日志初始化
-logger = logging.getLogger('logger')
-handler = logging.StreamHandler()
-logger.setLevel(logging.DEBUG)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-# Toast初始化
-toaster = ToastNotifier()
-
-# 数据库初始化
-with sqlite3.connect(SQLPATH) as conn:
-    cursor = conn.cursor()  
-
-    # 作品主表
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS illusts (
-        pid INTEGER PRIMARY KEY,
-        author_id INTEGER,
-        title TEXT,
-        created_at TEXT DEFAULT (datetime('now', 'localtime')),
-        is_private INTEGER DEFAULT 0
-    )''')
-
-    # 标签字典表
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS tags (
-        tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        jptag TEXT UNIQUE,
-        transtag TEXT
-    )''')
-
-    # 作品-标签关联表
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS illust_tags (
-        pid INTEGER,
-        tag_id INTEGER,
-        FOREIGN KEY(pid) REFERENCES illusts(pid),
-        FOREIGN KEY(tag_id) REFERENCES tags(tag_id),
-        UNIQUE(pid, tag_id)
-    )''')
-
-    # 创建索引
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_jptag ON tags(jptag)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_transtag ON tags(transtag)')
-    conn.commit()
-    cursor.close()
 
 
+# 工具函数
+def format_string(s: str, target_width: int):
+    """格式化字符串为固定长度
+
+    Args:
+        s (str): 要格式化的字符串
+        target_width (int): 目标长度
+
+    Returns:
+        (str): _description_
+    """
+    current_width = wcswidth(s)
+    if current_width >= target_width:
+        # 截断逻辑
+        res = []
+        width = 0
+        for c in s:
+            w = wcswidth(c)
+            if width + w > target_width:
+                break
+            res.append(c)
+            width += w
+        return ''.join(res) + ' ' * (target_width - width)
+    else:
+        return s + ' ' * (target_width - current_width)
 
 
-def handle_exception(logger: logging.Logger, func_name: str = None, in_bar = True, async_ = False):
+def config_check(logger: logging.Logger) -> bool:
+    """
+    配置文件检查, 返回False为出现错误
+    """
+    logger.info('检查配置文件')
+    if not all([type(UID) is str, 
+            type(CHROME_PATH) is str, 
+            type(COOKIE_EXPIRED_TIME) is int]):
+        logger.error('config.py数据类型校验失败')
+        return False
+    if any([UID == '', CHROME_PATH == '', COOKIE_EXPIRED_TIME == 0]):
+        logger.error('config.py中有变量值未填写')
+        return False
+    return True      
+
+
+def handle_exception(logger: logging.Logger, in_bar = True, _async = False):
     """对抛出错误的通用处理
 
     Args:
         logger (logging.Logger): logger
-        func_name (str, optional): 抛出错误的函数名(配合var_check()使用). Defaults to None.
-        in_bar(bool, optional): 原函数中是否打印进度条(tqdm)，防止输出错乱. Defaults to True.
+        in_bar (bool, optional): 原函数中是否打印进度条(tqdm)，防止输出错乱. Defaults to True.
+        _async (bool, optional): 原函数是否为异步函数，当in_bar为True时有效. Defaults to False.
     """
     exc_type, exc_value, tb = sys.exc_info()
     # 获取完整的堆栈跟踪信息
     tb_list = traceback.format_tb(tb)
     ex = "".join(tb_list)
     
-    if in_bar is True and async_ is False:
+    # 判断输出方式
+    if in_bar is True and _async is False:
         tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
         tqdm.write(f'ERROR {ex}')
-    elif in_bar is True and async_ is True:
+    elif in_bar is True and _async is True:
         async_tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
         async_tqdm.write(f'ERROR {ex}')
     else:
         logger.error(f'{exc_type.__name__}: {exc_value}')
         logger.error(ex)
 
-    if func_name:
-        return f'ERROR {func_name}'
 
 # 获取cookies
-def get_cookies(rtime: int, forced = False):
+def get_cookies(logger: logging.Logger, rtime: int, forced = False):
     """获取Google Chrome的cookies
 
     Args:
@@ -244,8 +221,9 @@ def get_cookies(rtime: int, forced = False):
 
 
 # 数据库相关操作
-db_lock = threading.Lock()
-def dbexecute(query: str, params: tuple|list[tuple]=None, many=False):  
+def dbexecute(query: str, 
+              params: tuple|list[tuple]=None, 
+              many=False):  
     """数据库操作
 
     Args:
@@ -257,26 +235,25 @@ def dbexecute(query: str, params: tuple|list[tuple]=None, many=False):
         list|None: 查询结果（若有）
     """
     res = ''
-    with db_lock:  # 确保只有一个线程可以执行这个块  
-        conn = sqlite3.connect(SQLPATH)  
-        cursor = conn.cursor()  
-        try:
-            if (many is True 
-                and type(params) == list 
-                and all(isinstance(item, tuple) for item in params)):   # 验证list[tuple]
-                cursor.executemany(query, params or ())
-            elif type(params) == tuple or params is None:
-                cursor.execute(query, params or ()) 
-            else:
-                 raise Exception("传入的params类型校验错误")
-            conn.commit()  
-            res = cursor.fetchall()
-        except Exception:
-            handle_exception(logger, inspect.currentframe().f_code.co_name)
-            conn.rollback()  
-        finally:  
-            cursor.close()  
-            conn.close()  
+    conn = sqlite3.connect(SQLPATH)  
+    cursor = conn.cursor()  
+    try:
+        if (many is True 
+            and type(params) == list 
+            and all(isinstance(item, tuple) for item in params)):   # 验证list[tuple]
+            cursor.executemany(query, params or ())
+        elif type(params) == tuple or params is None:
+            cursor.execute(query, params or ()) 
+        else:
+                raise Exception("传入的params类型校验错误")
+        conn.commit()  
+        res = cursor.fetchall()
+    except Exception:
+        handle_exception(logger, inspect.currentframe().f_code.co_name)
+        conn.rollback()  
+    finally:  
+        cursor.close()  
+        conn.close()  
     if res != '':
         return res
     else:
@@ -284,22 +261,7 @@ def dbexecute(query: str, params: tuple|list[tuple]=None, many=False):
 
 
 # 获取pixiv上的tags并翻译
-class ValCheckError(Exception):  
-    def __init__(self):  
-        super().__init__('参数校验错误: 上个函数在执行中出现错误')
-
-def var_check(*args):
-    '''
-    # 检查上个函数执行是否正常
-    '''
-    for var in args:
-        if str(var)[:5] == 'ERROR':
-            position = str(var).split(' ')[1]
-            logger.error(f'上个函数在执行中出现错误 所在函数:{position}')
-            return True
-
-
-def analyse_bookmarks(rest_flag=2, limit=100) -> list:
+def analyse_bookmarks(logger: logging.Logger, rest_flag=2, limit=100) -> list:
     """解析用户bookmarks接口URL
 
     接口名称: https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag={}&offset={}&limit={}&rest={}&lang={}
@@ -314,62 +276,58 @@ def analyse_bookmarks(rest_flag=2, limit=100) -> list:
 
     logger.info('正在运行')
 
-    try:
-        rest_dict = {0: ['show'], 1: ['hide'], 2: ['show', 'hide']}
-        rest = rest_dict[rest_flag]
+    rest_dict = {0: ['show'], 1: ['hide'], 2: ['show', 'hide']}
+    rest = rest_dict[rest_flag]
 
-        # 解析用户bookmark的插画数量
-        url_show = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=show&lang=zh'
-        url_hide = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=hide&lang=zh'
+    # 解析用户bookmark的插画数量
+    url_show = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=show&lang=zh'
+    url_hide = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=hide&lang=zh'
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
-            context = browser.new_context(storage_state=COOKIE_PATH)
-            session = context.request
-            
-            resp = session.get(url_show).json()
-            total_show = resp['body']['total']
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
+        context = browser.new_context(storage_state=COOKIE_PATH)
+        session = context.request
+        
+        resp = session.get(url_show).json()
+        total_show = resp['body']['total']
 
-            resp = session.get(url_hide).json()
-            total_hide = resp['body']['total']
-            
-            browser.close()
+        resp = session.get(url_hide).json()
+        total_hide = resp['body']['total']
+        
+        browser.close()
 
-        logger.info(f'解析bookmarks完成, 公开数量: {total_show}, 不公开数量: {total_hide}')
+    logger.info(f'解析bookmarks完成, 公开数量: {total_show}, 不公开数量: {total_hide}')
 
 
-        # 计算请求URL
-        urls = []
-        for r in rest:
-            if r == 'show':
-                total = total_show
-                k = total//limit            # 整步步数
-                l = total - k*limit + 1     # 剩余部分对应的limit
-                s = 0                       # 计数器
-                while k > s:
-                    urls.append(
-                        f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={limit}&rest=show&lang=zh')
-                    s += 1
-                
+    # 计算请求URL
+    urls = []
+    for r in rest:
+        if r == 'show':
+            total = total_show
+            k = total//limit            # 整步步数
+            l = total - k*limit + 1     # 剩余部分对应的limit
+            s = 0                       # 计数器
+            while k > s:
                 urls.append(
-                    f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={l}&rest=show&lang=zh')
-            elif r == 'hide':
-                total = total_hide
-                k = total//limit            # 整步步数
-                l = total - k*limit + 1     # 剩余部分对应的limit
-                s = 0                       # 计数器
-                while k > s:
-                    urls.append(
-                        f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={limit}&rest=hide&lang=zh')
-                    s += 1
-                
+                    f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={limit}&rest=show&lang=zh')
+                s += 1
+            
+            urls.append(
+                f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={l}&rest=show&lang=zh')
+        elif r == 'hide':
+            total = total_hide
+            k = total//limit            # 整步步数
+            l = total - k*limit + 1     # 剩余部分对应的limit
+            s = 0                       # 计数器
+            while k > s:
                 urls.append(
-                    f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={l}&rest=hide&lang=zh')
+                    f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={limit}&rest=hide&lang=zh')
+                s += 1
+            
+            urls.append(
+                f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset={s*limit}&limit={l}&rest=hide&lang=zh')
 
-        logger.info(f'解析接口URL完成, 数量: {len(urls)}')
-
-    except Exception:
-        urls = handle_exception(logger, inspect.currentframe().f_code.co_name)
+    logger.info(f'解析接口URL完成, 数量: {len(urls)}')
     return urls
 
 
@@ -409,7 +367,7 @@ async def analyse_illusts_worker(session: playwright.async_api.APIRequestContext
         finally:
             queue.task_done()
     
-async def analyse_illusts_main(bookmark_urls: list, max_concurrency = 3):
+async def analyse_illusts_main(logger: logging.Logger, bookmark_urls: list, max_concurrency = 3):
     """获取bookmark中每张插画的数据
 
     Args:
@@ -453,7 +411,7 @@ async def analyse_illusts_main(bookmark_urls: list, max_concurrency = 3):
     return illdatas
 
 
-def commit_illust_data(illdatas: list):
+def commit_illust_data(logger: logging.Logger, illdatas: list):
     """提交插画基本数据
 
     Args:
@@ -500,7 +458,9 @@ def commit_illust_data(illdatas: list):
     logger.info('提交完成')
 
 
-async def fetch_tag(session: playwright.async_api.APIRequestContext, tag: str, retries=5) -> tuple[str, dict]:
+async def fetch_tag(session: playwright.async_api.APIRequestContext, 
+                    tag: str, 
+                    retries=5) -> tuple[str, dict]:
     encoded_tag = parse.quote(tag, safe = '')
     url = f"https://www.pixiv.net/ajax/search/tags/{encoded_tag}?lang=zh"
     for attempt in range(retries):
@@ -521,11 +481,20 @@ async def fetch_tag(session: playwright.async_api.APIRequestContext, tag: str, r
                 return (tag, {"error": sys.exc_info()})
             await asyncio.sleep(0.5 * (attempt + 1))
 
-async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, queue: asyncio.Queue, results: list, pbar: async_tqdm):
+async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, 
+                           queue: asyncio.Queue, 
+                           results: list, 
+                           pbar: async_tqdm):
     while True:
         jptag = await queue.get()
         try:
-            pbar.set_description(f"Processing {str(jptag)[:10]}...")
+            # 格式化pbar描述
+            match jptag:
+                case str():
+                    desc = format_string(f"获取tag: {jptag}", 30)
+                case _:
+                    raise Exception(f'变量jptag为不支持的类型 {type(jptag)}')
+            pbar.set_description(desc)
             result: tuple[str, dict] = await fetch_tag(session, jptag)
             results.append(result)
             pbar.update(1)
@@ -534,133 +503,102 @@ async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, queu
         finally:
             queue.task_done()
 
-async def fetch_translated_tag_main(jptags: list = [], priority: list = [], max_concurrency = 20) -> tuple[list, list]:
+async def fetch_translated_tag_main(logger: logging.Logger, 
+                                    priority: list = ['zh', 'en', 'zh_tw'], 
+                                    max_concurrency = 20) -> tuple[list, list]:
+    """获取pixiv上的tag翻译
+
+    Args:
+        logger (logging.Logger): _description_
+        priority (list, optional): 翻译语言优先级列表（优先级递减）. Defaults to ['zh', 'en', 'zh_tw'].
+        max_concurrency (int, optional): 最大协程数量. Defaults to 20.
+
+    Returns:
+        tuple[list, list]: 包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
     """
-    ## 获取pixiv上的tag翻译
-    
-    ### args:
-    - jptags: 要获取翻译的原始tag列表
-    - priority: 翻译语言优先级列表（优先级递减）
-    - max_concurrency: 最大协程数量
-    
-    ### returns:
-    (tuple)包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
-    """
-    priority = ['zh', 'en', 'zh_tw']
     logger.info('正在运行')
-    #signature = inspect.signature(fetch_translated_tag_m)
-    #for param in signature.parameters.values():
-    #    if var_check(eval(param.name)) == 1:
-    #        raise ValCheckError
-    try:
-        if jptags == []:
-            # 只找出未翻译的tag
-            res = dbexecute('''
-                        SELECT jptag FROM tags WHERE transtag is NULL
-                        ''')
+    # 只找出未翻译的tag
+    res = dbexecute('''
+                SELECT jptag FROM tags WHERE transtag is NULL
+                ''')
 
-            jptags = [r[0] for r in res]
-            logger.info(f'已从数据库获取 {len(jptags)} 个tag')
-        else:   # 这行本来不用，为了便于理解就加上了，有传入说明是此次调用为重试
-            jptags = jptags
-            logger.info(f'已从参数中获取 {len(jptags)} 个tag')
-    
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                executable_path=CHROME_PATH
-            )
-            
-            context = await browser.new_context(storage_state=COOKIE_PATH)
-            session = context.request
-            
-            queue = asyncio.Queue()
-            for jptag in jptags:
-                await queue.put(jptag)
-            
-            results = []
-            
-            with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
-                workers = [
-                    asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
-                    for _ in range(min(max_concurrency, len(jptags)))
-                ]
+    jptags = [r[0] for r in res]
+    logger.info(f'已从数据库获取 {len(jptags)} 个tag')
 
-                await queue.join()
-                
-                for w in workers:
-                    w.cancel()
-            
-            await context.close()
-            await browser.close()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=CHROME_PATH
+        )
         
-        translation_results = []
-        tags_caught_exception = []
-        for tag, resp in results:
-            if resp['error'] is not False:
-                tags_caught_exception.append(tag)
+        context = await browser.new_context(storage_state=COOKIE_PATH)
+        session = context.request
+        
+        queue = asyncio.Queue()
+        for jptag in jptags:
+            await queue.put(jptag)
+        
+        results = []
+        
+        with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
+            workers = [
+                asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
+                for _ in range(min(max_concurrency, len(jptags)))
+            ]
+
+            await queue.join()
+            
+            for w in workers:
+                w.cancel()
+        
+        await context.close()
+        await browser.close()
+    
+    translation_results = []
+    tags_caught_exception = []
+    for tag, resp in results:
+        if resp['error'] is not False:
+            tags_caught_exception.append(tag)
+        else:
+            tagTranslation = resp['body']['tagTranslation']
+            transtag = ''
+            if tagTranslation == []:
+                # print(tagTranslation)
+                # logger.info(f'无tag {tag} 的翻译')
+                result = {tag: tag}
             else:
-                tagTranslation = resp['body']['tagTranslation']
-                transtag = ''
-                if tagTranslation == []:
-                    # print(tagTranslation)
-                    # logger.info(f'无tag {tag} 的翻译')
+                trans: dict = tagTranslation[tag]  # 包含所有翻译语言的dict
+                lans = trans.keys()
+                for l in priority:
+                    if l in lans and trans[l] != '':
+                        transtag = trans[l]
+                        break
+                if transtag == '':
+                    av = []
+                    for available in trans.values():
+                        if available != '':
+                            # 是否有不用遍历的方法?
+                            [av.append(_) for _ in trans.keys() if trans[_] == available]
+                    # logger.info(f'tag {tag} 无目标语言的翻译 & 可用的语言 {av}')
                     result = {tag: tag}
                 else:
-                    trans: dict = tagTranslation[tag]  # 包含所有翻译语言的dict
-                    lans = trans.keys()
-                    for l in priority:
-                        if l in lans and trans[l] != '':
-                            transtag = trans[l]
-                            break
-                    if transtag == '':
-                        av = []
-                        for available in trans.values():
-                            if available != '':
-                                # 是否有不用遍历的方法?
-                                [av.append(_) for _ in trans.keys() if trans[_] == available]
-                        # logger.info(f'tag {tag} 无目标语言的翻译 & 可用的语言 {av}')
-                        result = {tag: tag}
-                    else:
-                        result = {tag: transtag}
-                translation_results.append(result)
-                
-        return translation_results, tags_caught_exception
-    except Exception as e:
-        return handle_exception(logger, inspect.currentframe().f_code.co_name)
-
-def fetch_translated_tag_gather(retries = 10):
-    '''
-    ## 获取并整合翻译tag
+                    result = {tag: transtag}
+            translation_results.append(result)
     
-    ### args:
-    - retries: 重试次数
-    
-    ### returns:
-    (list)包含一个jptag-transtag的字典的列表
-    '''
-    count = 0
-    trans, not_trans = asyncio.run(fetch_translated_tag_main())
-    while count < retries:
-        if not_trans == []:
-            break
-        else:
-            logger.info(f'在翻译过程中出现了错误，共 {len(not_trans)} 个')
-            logger.info(f'重试...({count + 1}/{retries})')
-            trans_, not_trans = asyncio.run(fetch_translated_tag_main(not_trans))
-            trans.append(trans_)
-        count += 1
-    if not_trans != []:     # 重试后还是未能获取
+    # 在文件中记录翻译失败的tags
+    if len(tags_caught_exception) > 0:
         with open(TAG_LOG_PATH, 'a', encoding = 'utf-8') as f:
             f.write(str(time.strftime("%b %d %Y %H:%M:%S", time.localtime())))
-            f.write(f'请求tag {not_trans}')
+            f.write(f'请求tag {tags_caught_exception}')
             f.write('\n')
-        logger.warning('达到最大重试次数，但仍有部分tag未能翻译，失败的结果已写入log')
-    logger.info(f'INFO 翻译完成，成功:{len(trans)}  失败:{len(not_trans)}')
-    return trans
+        logger.warning('有部分tag未能翻译，失败的结果已写入log')
+    
+    logger.info(f'tag翻译成功，成功 {len(translation_results)} 个, 失败 {len(tags_caught_exception)} 个')
+    return translation_results, tags_caught_exception
 
 
-def commit_translated_tags(translated_tags: list):
+def commit_translated_tags(logger: logging.Logger, translated_tags: list):
     """提交翻译后的tags
 
     Args:
@@ -680,182 +618,20 @@ def commit_translated_tags(translated_tags: list):
     logger.info('翻译后的tag已提交')
 
 
-
-def write_transtags_to_db_i(tran: dict):
-    '''
-    `tran`: 需要提交的tags (jp:tr)
-    '''
-    try:
-        if tran is None:
-            tqdm.write('ERROR 参数为NoneType类型，忽略')
-        else:
-            transtag = list(tran.values())[0]
-            jptag = list(tran.keys())[0]
-        # 注意sql语句transtag用双引号！
-        # 否则执行sql时会有syntax error
-        dbexecute(
-            f'''UPDATE tags SET transtag = "{transtag}" WHERE jptag = "{jptag}"''')
-    except Exception as e:
-        tqdm.write(sys.exc_info())
-        tqdm.write(f'函数传入参数: {tran}')
-def write_transtags_to_db_m(th_count, trans):
-    """提交翻译后的tags
-
-    Args:
-        th_count (int): 线程数
-        trans (list): 包含原tag与翻译后tag字典的列表集合
-    """
-    logger.info('正在运行')
-    signature = inspect.signature(write_transtags_to_db_m)
-    for param in signature.parameters.values():
-        if var_check(eval(param.name)) == 1:
-            raise ValCheckError
-    try:
-        all_th = []
-        logger.info(f'创建线程池，线程数量: {th_count}')
-        with ThreadPoolExecutor(max_workers=th_count) as pool:
-            for t in trans:
-                exc = pool.submit(write_transtags_to_db_i, t)
-                all_th.append(exc)
-            for th in tqdm(as_completed(all_th), total=len(all_th)):
-                if th.exception():
-                    logger.error(f'运行时出现错误: {th.exception()}')
-        logger.info('翻译后的tag已提交至表tags')
-    except Exception:
-        handle_exception(logger, inspect.currentframe().f_code.co_name)
-
-
-def transtag_return_i(r0):
-    try:
-        pid, jptag0 = r0[0], r0[1]
-        jptags = eval(jptag0)
-        l = [''] * len(jptags)
-        for i in range(len(jptags)):
-            resp = dbexecute('''
-                        SELECT jptag,transtag FROM tags
-                        ''')
-            for r in resp:
-                jptag, transtag = r
-                if jptag == jptags[i]:
-                    l[i] = base64.b64encode(transtag.encode('utf-8'))
-        dbexecute(f'''
-                    UPDATE illusts SET transtag = "{l}" WHERE pid = {pid}
-                    ''')
-        dbexecute(f'''
-                    UPDATE illusts SET is_translated = 1 WHERE pid = {pid}
-                    ''')
-        # logger.debug(l)
-    except Exception as e:
-        handle_exception(logger, inspect.currentframe().f_code.co_name)
-def transtag_return_m(th_count):
-    '''
-    上传翻译后的tags至表illust
-    '''
-    logger.info('正在运行')
-    signature = inspect.signature(transtag_return_m)
-    for param in signature.parameters.values():
-        if var_check(eval(param.name)) == 1:
-            raise ValCheckError()
-    try:
-        logger.info(f'创建线程池，线程数量: {th_count}')
-        with ThreadPoolExecutor(max_workers=th_count) as pool:
-            resp0 = dbexecute('SELECT pid,jptag FROM illusts')
-            
-            all_th = [pool.submit(transtag_return_i, r0) for r0 in resp0]
-            for th in tqdm(as_completed(all_th), total=len(all_th)):
-                pass
-        logger.info('翻译后的tag已提交至表illust')
-    except Exception:
-        handle_exception(logger, inspect.currentframe().f_code.co_name)
-
-
-def mapping() -> dict:
-    '''
-    将illust表中存储的数据转换为tag对pid的映射
-    '''
-    logger.info('开始构建tag对pid的映射')
-    res = dbexecute('SELECT pid,jptag,transtag FROM illusts')
-
-    pid__tag = []   # pid对应的tag
-    tag__pid = {}   # tag对应的pid
-
-    def formatter(pid, string: str) -> dict:
-        '''
-        将数据库中的transtag值格式化 \n
-        已弃用
-        '''
-        s = string.strip('"').replace('\\', '').replace('\"', '"').strip()
-        matches = re.findall(r'"([^"]+?)"', s)
-        return {pid: matches}
-    for r in res:
-        transtag_base64 = eval(r[2])
-        transtag = []
-        for tag_base64 in transtag_base64:
-            tag = base64.b64decode(tag_base64).decode('utf-8')
-            transtag.append(tag)
-        
-        pid__tag.append({r[0]: eval(r[1])})
-        pid__tag.append({r[0]: transtag})
-
-    logger.info(f'从数据库获取的数据解析完成，共有 {len(pid__tag) // 2} 个pid')
-
-    for p in pid__tag:
-        for key, value_list in p.items():
-            for value in value_list:
-                if value in tag__pid:
-                    # 如果值已经存在，将原字典的键添加到该值的列表中
-                    tag__pid[value].append(key)
-                else:
-                    # 如果值不存在，创建一个新的列表并添加原字典的键
-                    tag__pid[value] = [key]
-    logger.info(f'映射构建完成，共 {len(tag__pid)} 对')
-    
-    # 补全空值，方便后续创建dataframe对象
-    maxlen = 0
-    for t in tag__pid:
-        tmp = len(tag__pid[t])
-        if tmp > maxlen:
-            maxlen = tmp
-    for t in tag__pid:
-        tmp = len(tag__pid[t])
-        if tmp < maxlen:
-            tag__pid[t].extend([None]*(maxlen-tmp))
-    logger.info('补齐空值完成')
-    return tag__pid
-
-
 def main():
     while True:
-        # 备份并清空上次运行的结果(若有)
-        timestamp = os.path.getmtime(CWD + '\\temp\\result').__round__(0)
-        SrcModifyTime = datetime.datetime.fromtimestamp(timestamp)
-        try:
-            with open(CWD + '\\temp\\result', 'r', encoding = 'utf-8') as f:
-                lines = f.readlines()
-            if lines != []:
-                logger.info('备份上次运行时fetch_translated_tag_i函数的返回值')
-
-                shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
-
-                with open(CWD + '\\temp\\result', 'w', encoding = 'utf-8') as f:
-                    f.write('')
-        except UnicodeDecodeError:
-            logger.error("读取文件时遇到编码错误")
-            logger.info("直接复制文件")
-            shutil.copy(CWD + '\\temp\\result', CWD + '\\temp\\history\\' + str(SrcModifyTime).replace(':','-'))
-
         print(mode_select)
         mode = input('模式 = ')
         if mode == '1':
             start = time.time()
-            get_cookies(rtime=COOKIE_EXPIRED_TIME)
-            URLs = analyse_bookmarks()
+            get_cookies(logger, rtime=COOKIE_EXPIRED_TIME)
+            URLs = analyse_bookmarks(logger)
             
             # debug:
             # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
-            illdatas = asyncio.run(analyse_illusts_main(URLs))
+            illdatas = asyncio.run(analyse_illusts_main(logger, URLs))
 
             # debug:
             #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
@@ -864,137 +640,35 @@ def main():
             #]
 
 
-            commit_illust_data(illdatas)
+            commit_illust_data(logger, illdatas)
 
 
-            trans = fetch_translated_tag_gather()
+            trans, _ = asyncio.run(fetch_translated_tag_main(logger))
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
 
-            commit_translated_tags(trans)
+            commit_translated_tags(logger, trans)
 
-            transtag_return_m(TRANSTAG_RETURN_THREADS)
             end = time.time()
-            toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
-            logger.info(f'总耗时: {end-start} 秒')
-        elif mode == '2':
-            map_result = mapping()
-            df = pd.DataFrame(map_result)
-            logger.info('数据操作全部完成')
-            logger.info('进入交互模式')
-            
-            # 交互模式相关函数
-            def _help():
-                print(help_text)
-            def _search():
-                key = ''
-                while key == '':
-                    print('参数: -f 强制搜索此tag [-f tag]')
-                    print('参数: -c 多tag搜索 [-c tag0 tag1 tag2]')
-                    print('输入关键词以进行查询（只支持单个参数）:')
-                    cmd_key = input()
 
-                    keys = list(map_result.keys())
-                    if len(cmd_key.split(' ')) == 1:
-                        key = cmd_key
-                        target_keys = get_close_matches(key, keys, n=3, cutoff=0.5)
-                        
-                        print(f'可能的结果: {target_keys}')
-                        try:
-                            target_key_index = int(input('输入元素索引: '))
-                            print(f'pids: {set(list(df[target_keys[target_key_index]].dropna().astype(int).sort_values(ascending = False)))}')
+            toaster.show_toast('PixivTags', f'已更新tags至本地数据库, 耗时 {round(end-start, 2)} s', duration = 10)
+        
+        elif mode == "2":
+            searcher = search.PixivSearcher(logger, SQLPATH)
+            try:
+                print(search_introduction)
+                while (query:= '_') != '':
+                    query = input('请输入查询条件: ')
+                    print(searcher.search(query))
+                    print('')
+                    print('-' * 50)
+            except Exception as e:
+                handle_exception(logger)
+            finally:
+                searcher.close()
 
-                        except Exception as e:
-                            handle_exception(logger)
-                            continue
-
-                    elif cmd_key.split(' ')[0] == '-f':
-                        key = cmd_key.split(' ')[-1]
-                        try:
-                            print(f'pids: {set(list(df[key].dropna().astype(int).sort_values(ascending = False)))}')
-                        except Exception:
-                            handle_exception(logger)
-                    elif cmd_key.split(' ')[0] == '-c':
-                        plist = []      # 存放每次查询返回的结果集合
-                        intersection = []   # 取得的交集
-                        
-                        keylist = cmd_key.split(' ')[1:]
-                        
-                        s = 1
-                        l = len(keylist)
-                        for k in keylist:
-                            while True:
-                                print(f'正在查询的key为第 {s} 个, 共 {l} 个')
-                                target_keys = get_close_matches(k, keys, n=3, cutoff=0.5)
-                                
-                                print(f'可能的结果: {target_keys}')
-                                try:
-                                    target_key_index = int(input('输入元素索引: '))
-                                    plist.extend(set(list(df[target_keys[target_key_index]].dropna().astype(int))))
-                                    s += 1
-                                    break
-                                except Exception as e:
-                                    handle_exception(logger)
-                                    continue
-
-                        for p in set(plist):
-                            num = plist.count(p)
-                            if num == l:
-                                intersection.append(p)
-                        print(f'pids: {sorted(intersection)}') 
-                        key = 'done'
-                    else:
-                        print(f"未知的参数: {cmd_key.split(' ')[0]}")
-            def _exit():
-                logger.info('程序执行完成')
-                exit()
-            def _list():
-                print(df)
-            def _hot():
-                print('获取的tags数目: ')
-                num = int(input())
-                ser = df.count().sort_values(ascending = False).head(num)
-                print(ser)
-            def _debug():
-                print(eval(input('python>')))
-            _help()
-            while True:
-                print('>>>', end='')
-                search = input()
-                if search in reserve_words:
-                    eval(reserve_words[search])
-                else:
-                    print('未知的指令')
-                    _help()
-                print('\n')
         elif mode == '3':
-            # 此段代码参考fetch_translated_tag_m函数
-            result = []
-            history_file_name = input('输入历史记录文件名(位于/history目录下，格式为: xxxx-xx-xx xx-xx-xx)')
-            history_file_path = CWD + '\\temp\\history\\' + history_file_name
-            if os.path.exists(history_file_path):
-                with open(history_file_path, 'r', encoding = 'utf-8') as f:
-                    lines = f.readlines()
-                    for line in lines:
-                        dic = eval(line)
-                        result.append(dic)
-            else:
-                logger.warning(f'指定的文件不存在 {history_file_path}')
-            
-            s = 0
-            for r in result:
-                if r is not None:
-                    r: dict
-                    if list(r.keys()) == list(r.values()):
-                        s += 1
-            logger.info(f'tag翻译获取完成, 共 {len(result)} 个, 无翻译 {s} 个')
-            write_transtags_to_db_m(WRITE_TRANSTAGS_TO_DB_THREADS, result)
-
-            transtag_return_m(TRANSTAG_RETURN_THREADS)
-            end = time.time()
-            toaster.show_toast('PixivTags', '已更新tags至本地数据库', duration = 10)
-        elif mode == '4':
             logger.info('程序退出')
             break
         else:
@@ -1002,4 +676,59 @@ def main():
         print('')
 
 if __name__ == "__main__":
-    main()
+    # 日志初始化
+    logger = logging.getLogger('logger')
+    handler = logging.StreamHandler()
+    logger.setLevel(logging.DEBUG)
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    # Toast初始化
+    toaster = ToastNotifier()
+
+    # 数据库初始化
+    with sqlite3.connect(SQLPATH) as conn:
+        cursor = conn.cursor()  
+
+        # 作品主表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS illusts (
+            pid INTEGER PRIMARY KEY,
+            author_id INTEGER,
+            title TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            is_private INTEGER DEFAULT 0
+        )''')
+
+        # 标签字典表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tags (
+            tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            jptag TEXT UNIQUE,
+            transtag TEXT
+        )''')
+
+        # 作品-标签关联表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS illust_tags (
+            pid INTEGER,
+            tag_id INTEGER,
+            FOREIGN KEY(pid) REFERENCES illusts(pid),
+            FOREIGN KEY(tag_id) REFERENCES tags(tag_id),
+            UNIQUE(pid, tag_id)
+        )''')
+
+        # 创建索引
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_jptag ON tags(jptag)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_transtag ON tags(transtag)')
+        conn.commit()
+        cursor.close()
+
+
+    if (status:=config_check(logger)) == True:
+        main()
+    else:
+        logger.info('请前往 src/config.py 修改配置文件')

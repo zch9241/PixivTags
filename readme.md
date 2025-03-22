@@ -4,44 +4,42 @@
 
 `PixivTags` 是一个获取用户在pixiv上收藏插画tags的爬虫，它旨在解决pixiv网站上用户无法对自己收藏的插画进行搜索的问题
 
-## 安装指南
+## 重要说明
 
-1. 确保你安装了 `Python 3.13` (程序在其他版本可能出现兼容性问题)
+1. 确保你安装了 `Python >=3.12` (程序在其他版本可能出现兼容性问题)
 2. 推荐使用 `Visual Studio Code` 运行本程序
-3. 克隆仓库
+3. 本项目利用`Google Chrome`保存的cookie实现登录，所以请提前使用上述浏览器登录pixiv以保留登录凭据，并在程序获取cookie时关闭浏览器，否则会报错
 
-   ```bash
-   git clone https://github.com/zch9241/PixivTags.git
-4. 进入项目目录并安装依赖项（请自行阅读根目录下`main.py`的源代码）
+## 运行说明
 
-## 使用说明
+1. 安装依赖（请自行阅读根目录下`main.py`的源代码）
+2. 运行项目根目录下的`setup.bat`
+3. 编辑src文件夹下的`config.py`
 
-1. 使用`cmd`运行项目根目录下的`setup.bat`
-2. 编辑`config.py`，其位于/src/
+   注意：修改时请保留单引号！
 
    ```Python
    UID: str = ''    # 修改为你的UID
    CHROME_PATH: str = r''     # 修改为Google Chrome主程序位置
-3. (使用vs code)运行项目根目录下的`main.py`
+4. 运行项目根目录下的`main.py`
 
 ## 拓展说明
 
-1. 关于`config.py`
+1. 关于`config.py`的说明
 
    ```Python
-   ANALYSE_ILLUST_THREADS: int = 10         # 函数analyse_illusts_i 的最大线程数量
-   WRITERAW_TO_DB_THREADS: int = 10         # 同理
-   WRITE_TAGS_TO_DB_THREADS: int = 10
-   FETCH_TRANSLATED_TAG_THREADS: int = 8
-   WRITE_TRANSTAGS_TO_DB_THREADS: int = 10
-   TRANSTAG_RETURN_THREADS: int = 10
    UID: str = ''                            # 你的pixiv UID
    CHROME_PATH: str = r''                   # Google Chrome主程序位置
-   COOKIE_EXPIRED_TIME = 43200              # 重新获取cookie的时间间隔
+   COOKIE_EXPIRED_TIME = 43200              # 重新获取cookie的时间间隔，单位为秒
+2. 其他可调参数（若不清楚作用请不要随意改动）
 
-2. 本项目利用`Google Chrome`保存的cookie实现登录，所以请提前使用上述浏览器登录pixiv以保留登录凭据
-
-3. 本项目不提供访问pixiv的方法，请自行解决网络问题
+   - 函数 `analyse_bookmarks`:
+      - 参数 `rest_flag`：获取的收藏插画的可见性 (0=公开, 1=不公开, 2=全部)
+   - 函数 `analyse_illusts_main`:
+      - 参数 `max_concurrency`，最大协程数量
+   - 函数 `fetch_translated_tag_main`:
+      - 参数 `priority`，翻译语言优先级
+      - 参数 `max_concurrency`，最大协程数量
 
 ## 版权声明
 
