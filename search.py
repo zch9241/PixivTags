@@ -250,19 +250,123 @@ class PixivSearchCLI:
         self.engine = PixivSearchEngine(db_path)
         self.completer = TagCompleter(db_path)
         self.session = PromptSession(completer=self.completer)
+        
+        # 分页相关变量
+        self.current_results = []
+        self.current_page = 1
+        self.page_size = 10  # 默认每页显示10条结果
+        self.current_query = ""
     
-    def display_result(self, results):
-        """格式化并显示搜索结果"""
-        if isinstance(results, str):  # 错误消息
-            print(results)
-            return
+    def display_result(self, results=None, page=None):
+        """分页显示搜索结果"""
+        # 如果提供了新的结果，则更新当前结果集
+        if results is not None:
+            if isinstance(results, str):  # 错误消息
+                print(results)
+                return False
+            self.current_results = results
+            self.current_page = 1  # 重置为第一页
+        
+        # 如果指定了页码，则更新当前页
+        if page is not None:
+            self.current_page = page
             
-        print(f"\n共找到 {len(results)} 个结果:")
-        for i, row in enumerate(results[:30], 1):
+        if not self.current_results:
+            print("\n没有找到匹配的结果。")
+            return False
+        
+        # 计算总页数
+        total_pages = (len(self.current_results) + self.page_size - 1) // self.page_size
+        
+        # 确保当前页在有效范围内
+        if self.current_page < 1:
+            self.current_page = 1
+        elif self.current_page > total_pages:
+            self.current_page = total_pages
+        
+        # 计算当前页的结果范围
+        start_idx = (self.current_page - 1) * self.page_size
+        end_idx = min(start_idx + self.page_size, len(self.current_results))
+        
+        # 清屏并显示结果
+        print("\n" + "="*60)
+        print(f"查询: {self.current_query}")
+        print(f"共找到 {len(self.current_results)} 个结果 (第 {self.current_page}/{total_pages} 页)")
+        print("="*60)
+        
+        for i, row in enumerate(self.current_results[start_idx:end_idx], start_idx + 1):
             print(f"{i}. [PID: {row['pid']}] {row['title']} (作者ID: {row['author_id']})")
         
-        if len(results) > 30:
-            print(f"... 还有 {len(results) - 30} 个结果未显示")
+        # 显示分页控制说明
+        print("\n--- 分页控制 ---")
+        print("  :n 或 :next        - 下一页")
+        print("  :p 或 :prev        - 上一页")
+        print("  :f 或 :first       - 第一页")
+        print("  :l 或 :last        - 最后一页")
+        print("  :g <页码> 或 :go <页码> - 跳转到指定页")
+        print("  :s <数量> 或 :size <数量> - 设置每页显示数量")
+        print("  :q 或 :quit        - 返回搜索模式")
+        
+        return True
+    
+    def handle_pagination(self):
+        """处理分页模式"""
+        while True:
+            try:
+                cmd = self.session.prompt("\n分页控制> ").strip()
+                
+                if cmd in [':q', ':quit', '']:
+                    return  # 退出分页模式
+                
+                total_pages = (len(self.current_results) + self.page_size - 1) // self.page_size
+                
+                if cmd in [':n', ':next']:
+                    if self.current_page < total_pages:
+                        self.display_result(page=self.current_page + 1)
+                    else:
+                        print("已经是最后一页")
+                
+                elif cmd in [':p', ':prev']:
+                    if self.current_page > 1:
+                        self.display_result(page=self.current_page - 1)
+                    else:
+                        print("已经是第一页")
+                
+                elif cmd in [':f', ':first']:
+                    self.display_result(page=1)
+                
+                elif cmd in [':l', ':last']:
+                    self.display_result(page=total_pages)
+                
+                elif cmd.startswith((':g ', ':go ')):
+                    try:
+                        page_num = int(cmd.split(' ')[1])
+                        if 1 <= page_num <= total_pages:
+                            self.display_result(page=page_num)
+                        else:
+                            print(f"页码超出范围，有效范围: 1-{total_pages}")
+                    except (ValueError, IndexError):
+                        print("无效的页码")
+                
+                elif cmd.startswith((':s ', ':size ')):
+                    try:
+                        new_size = int(cmd.split(' ')[1])
+                        if new_size > 0:
+                            self.page_size = new_size
+                            print(f"每页显示数量已设置为 {new_size}")
+                            self.display_result()  # 使用新的页面大小重新显示
+                        else:
+                            print("每页显示数量必须大于0")
+                    except (ValueError, IndexError):
+                        print("无效的数量")
+                
+                else:
+                    print("未知命令，请使用有效的分页控制命令")
+            
+            except KeyboardInterrupt:
+                return  # 退出分页模式
+            except Exception as e:
+                print(f"错误: {str(e)}")
     
     def show_help(self):
         """显示帮助信息"""
@@ -296,8 +400,13 @@ class PixivSearchCLI:
                     self.show_help()
                     continue
                 
+                # 执行搜索
+                self.current_query = query
                 results = self.engine.search(query)
-                self.display_result(results)
+                
+                # 如果有结果进入分页模式
+                if self.display_result(results):
+                    self.handle_pagination()
                 
             except KeyboardInterrupt:
                 continue
