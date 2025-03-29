@@ -1,0 +1,6 @@
+prompt-toolkit
+playwright
+psutil
+tqdm
+wcwidth
+win10toast

@@ -11,16 +11,11 @@
 # 
 
 # TODO:
-# 优化查询功能
 # 为插画添加更多元数据
 
 
 # done:
-# 一些收尾工作
-# docs:修改readme说明
-# feat:为fetch_translated_tag优化了进度条，现在进度条右侧内容将保持稳定不再跳动
-# feat:完成主要查询功能
-
+# 插画查询功能
 
 # standard-libs
 import asyncio
@@ -63,23 +58,12 @@ TAG_LOG_PATH = CWD + r'\logs\err_tags.log'
 
 # 交互模式
 mode_select = """
+\n===== PixivTags =====
 请选择模式: 
 1 = 更新tags至本地数据库
 2 = 基于本地数据库进行插画搜索
 3 = 退出
-"""
-search_introduction = """
-进入搜索模式（回车以退出）
-
-搜索语法：
-NOT: -前缀
-AND: 空格分隔 或 直接输入AND
-OR: 直接输入OR
-特性：
-1. 支持括号
-2. 支持带连字符的标签（如 R-18）
-3. 支持引号包裹的标签
-4. 精准的否定操作符识别
+=====================\n
 """
 
 
@@ -655,18 +639,7 @@ def main():
             toaster.show_toast('PixivTags', f'已更新tags至本地数据库, 耗时 {round(end-start, 2)} s', duration = 10)
         
         elif mode == "2":
-            searcher = search.PixivSearcher(logger, SQLPATH)
-            try:
-                print(search_introduction)
-                while (query:= '_') != '':
-                    query = input('请输入查询条件: ')
-                    print(searcher.search(query))
-                    print('')
-                    print('-' * 50)
-            except Exception as e:
-                handle_exception(logger)
-            finally:
-                searcher.close()
+            search.main(SQLPATH)
 
         elif mode == '3':
             logger.info('程序退出')
