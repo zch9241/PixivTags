@@ -47,18 +47,23 @@
 
 2. 其他可调参数（**若不清楚作用请不要随意改动**）
 
+   **main.py**
+
+   - 函数 `get_cookies`:
+      - 参数 `forced`: 强制更新cookie
    - 函数 `analyse_bookmarks`:
-
       - 参数 `rest_flag`：获取的收藏插画的可见性 (0=公开, 1=不公开, 2=全部)
-
    - 函数 `analyse_illusts_main`:
-
       - 参数 `max_concurrency`，最大协程数量（如果频繁出现429错误请减小此数值）
-
    - 函数 `fetch_translated_tag_main`:
-
       - 参数 `priority`，翻译语言优先级
       - 参数 `max_concurrency`，最大协程数量如果频繁出现429错误请减小此数值）
+
+   **search.py**
+
+   - 类 `PixivSearchCLI`:
+
+      - 参数 `page_size`: 分页模式的默认分页数量
 
 ## 版权声明
 
