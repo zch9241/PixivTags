@@ -14,8 +14,6 @@
 # 为插画添加更多元数据
 
 
-# done:
-# 插画查询功能
 
 # standard-libs
 import asyncio
@@ -23,7 +21,7 @@ import inspect
 import json
 import logging
 import os
-import pdb
+import shutil
 import sqlite3
 import sys
 import time
@@ -31,6 +29,7 @@ import traceback
 from urllib import parse
 
 # site-packages
+import ipdb
 from playwright.async_api import async_playwright
 import playwright.async_api
 from playwright.sync_api import sync_playwright
@@ -136,75 +135,6 @@ def handle_exception(logger: logging.Logger, in_bar = True, _async = False):
         logger.error(ex)
 
 
-# 获取cookies
-def get_cookies(logger: logging.Logger, rtime: int, forced = False):
-    """获取Google Chrome的cookies
-
-    Args:
-        rtime (int): cookie更新间隔
-        forced (bool): 是否强制更新
-    """
-    # 判断是否需要更新cookies
-    logger.info('验证cookie有效性')
-    
-    with open(COOKIE_TIME_PATH, 'r') as f:
-        data = f.read()
-        if data != '':
-            modify_time = float(data)
-        else:
-            modify_time = 0
-    relative_time = time.time() - modify_time
-    
-    if (relative_time < rtime and 
-        relative_time > 0 and 
-        forced is False):
-        
-        logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
-    
-    else:
-        logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
-
-        # 判断Google Chrome是否在运行，如果在chrome运行时使用playwright将会报错
-        def find_process(name):
-            for proc in psutil.process_iter(['pid', 'name']):
-                try:
-                    if name.lower() in proc.info['name'].lower():
-                        return proc
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-            return None
-
-        def kill_process(name):
-            proc = find_process(name)
-            while proc:
-                logger.info(f"找到 chrome 进程 (name: {proc.info['name']}, PID: {proc.info['pid']})")
-                logger.info("请结束进程，否则cookies无法正常获取")
-                
-                os.system('pause')
-                proc = find_process(name)
-        kill_process("chrome.exe")
-
-        # 获取cookies
-        with sync_playwright() as p:
-            browser = p.chromium.launch_persistent_context(headless=True,
-                executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-                user_data_dir=os.path.expanduser(
-                    os.path.join(os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data'))
-                )
-            
-            with open(r'.\src\cookies.json','w') as f:
-                state = {"cookies": browser.cookies('https://www.pixiv.net'), "origins": []}
-                f.write(json.dumps(state))
-            # 关闭浏览器
-            browser.close()
-        logger.info('cookies已获取')
-        
-        # 更新获取cookie的时间
-        with open(COOKIE_TIME_PATH, "w") as f:
-            f.write(str(time.time()))
-
-
-# 数据库相关操作
 def dbexecute(query: str, 
               params: tuple|list[tuple]=None, 
               many=False):  
@@ -242,6 +172,88 @@ def dbexecute(query: str,
         return res
     else:
         return None
+
+
+# 获取cookies
+def get_cookies(logger: logging.Logger, rtime: int, forced = False):
+    """获取Google Chrome的cookies
+
+    Args:
+        rtime (int): cookie更新间隔
+        forced (bool): 是否强制更新
+    """
+    # 判断是否需要更新cookies
+    logger.info('验证cookie有效性')
+    
+    with open(COOKIE_TIME_PATH, 'r') as f:
+        data = f.read()
+        if data != '':
+            modify_time = float(data)
+        else:
+            modify_time = 0
+    relative_time = time.time() - modify_time
+    
+    if (relative_time < rtime and 
+        relative_time > 0 and 
+        forced is False):
+        
+        logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
+    
+    else:
+        if forced is False:
+            logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
+        elif forced is True:
+            logger.info('forced=True, 强制更新cookies')
+
+        # 判断Google Chrome是否在运行，如果在chrome运行时使用playwright将会报错
+        def find_process(name):
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if name.lower() in proc.info['name'].lower():
+                        return proc
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            return None
+
+        def kill_process(name):
+            proc = find_process(name)
+            while proc:
+                logger.info(f"找到 chrome 进程 (name: {proc.info['name']}, PID: {proc.info['pid']})")
+                logger.info("请结束进程，否则cookies无法正常获取")
+                
+                os.system('pause')
+                proc = find_process(name)
+        kill_process("chrome.exe")
+
+        # 获取cookies
+        user_data_dir=os.path.expanduser(
+            os.path.join(os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data'))
+        ## 备份 Preferences 文件
+        preferences_file = os.path.join(user_data_dir, 'Default', 'Preferences')
+        backup_file = preferences_file + '.backup'
+        shutil.copy2(preferences_file, backup_file)
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(headless=True,
+                    executable_path=CHROME_PATH,
+                    user_data_dir=user_data_dir
+                    )
+                
+                with open(r'.\src\cookies.json','w') as f:
+                    state = {"cookies": browser.cookies('https://www.pixiv.net'), "origins": []}
+                    f.write(json.dumps(state))
+                # 关闭浏览器
+                browser.close()
+        finally:
+            # 恢复 Preferences 文件
+            shutil.copy2(backup_file, preferences_file)
+            os.remove(backup_file)
+
+        logger.info('cookies已获取')
+        
+        # 更新获取cookie的时间
+        with open(COOKIE_TIME_PATH, "w") as f:
+            f.write(str(time.time()))
 
 
 # 获取pixiv上的tags并翻译
@@ -489,26 +501,34 @@ async def fetch_tag_worker(session: playwright.async_api.APIRequestContext,
 
 async def fetch_translated_tag_main(logger: logging.Logger, 
                                     priority: list = ['zh', 'en', 'zh_tw'], 
+                                    jptags: list = [],
                                     max_concurrency = 20) -> tuple[list, list]:
     """获取pixiv上的tag翻译
 
     Args:
-        logger (logging.Logger): _description_
+        logger (logging.Logger): no description
         priority (list, optional): 翻译语言优先级列表（优先级递减）. Defaults to ['zh', 'en', 'zh_tw'].
+        jptags (list, optional): 要翻译的tag列表. Defaults to [].
         max_concurrency (int, optional): 最大协程数量. Defaults to 20.
 
     Returns:
         tuple[list, list]: 包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
     """
     logger.info('正在运行')
-    # 只找出未翻译的tag
-    res = dbexecute('''
-                SELECT jptag FROM tags WHERE transtag is NULL
-                ''')
+    if not jptags:
+        # 只找出未翻译的tag
+        res = dbexecute('''
+                    SELECT jptag FROM tags WHERE transtag is NULL
+                    ''')
 
-    jptags = [r[0] for r in res]
-    logger.info(f'已从数据库获取 {len(jptags)} 个tag')
-
+        jptags = [r[0] for r in res]
+        logger.info(f'已从数据库获取 {len(jptags)} 个tag')
+    else:
+        if all(isinstance(jptag, str) for jptag in jptags):
+            pass
+        else:
+            logger.warning('传入的jptags类型校验错误')
+            return ([], [])
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -589,12 +609,17 @@ def commit_translated_tags(logger: logging.Logger, translated_tags: list):
         translated_tags (list): fetch_translated_tags获取的翻译后tag列表
     """
     logger.info('正在运行')
-    jpTags_transTags = [(list(jptag_transtag.keys())[0], 
-                         list(jptag_transtag.values())[0])
+    jpTags_transTags = [(list(jptag_transtag.values())[0], 
+                         list(jptag_transtag.keys())[0])
                         for jptag_transtag in translated_tags]  # 转换tag翻译对应关系为元组
     with sqlite3.connect(SQLPATH) as conn:
         cursor = conn.cursor()
+        
+        logger.debug(f"准备提交{len(jpTags_transTags)}个翻译tag")
         cursor.executemany('UPDATE OR IGNORE tags SET transtag = ? WHERE jptag = ?', jpTags_transTags)
+        updated_rows = cursor.rowcount
+        logger.debug(f"成功更新{updated_rows}个tag的翻译")
+        
         cursor.execute("UPDATE tags SET transtag = NULL WHERE transtag == 'None'")
         conn.commit()
         cursor.close()
@@ -655,7 +680,7 @@ if __name__ == "__main__":
     logger.setLevel(logging.DEBUG)
     handler.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
-        "[%(asctime)s %(name)s %(thread)d %(funcName)s] %(levelname)s %(message)s")
+        "[%(funcName)s] (%(levelname)s) %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
@@ -701,7 +726,7 @@ if __name__ == "__main__":
         cursor.close()
 
 
-    if (status:=config_check(logger)) == True:
+    if (status:=config_check(logger)) is True:
         main()
     else:
         logger.info('请前往 src/config.py 修改配置文件')

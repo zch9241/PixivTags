@@ -19,6 +19,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 
+
 class QueryParser:
     """查询解析器，将自然语言查询转换为抽象语法树（AST）"""
     def __init__(self):
@@ -244,9 +245,32 @@ class PixivSearchEngine:
         except Exception as e:
             return f"搜索错误: {str(e)}"
 
+    def get_popular_tags(self, limit=50):
+        """获取出现次数最多的标签
+        
+        Args:
+            limit (int): 要返回的标签数量
+        
+        Returns:
+            list: 包含标签信息的列表
+        """
+        try:
+            self.cursor.execute("""
+                SELECT t.tag_id, t.jptag, t.transtag, COUNT(it.pid) as count 
+                FROM tags t
+                JOIN illust_tags it ON t.tag_id = it.tag_id
+                GROUP BY t.tag_id
+                ORDER BY count DESC
+                LIMIT ?
+            """, (limit,))
+            
+            return self.cursor.fetchall()
+        except Exception as e:
+            return f"获取热门标签出错: {str(e)}"
+        
 class PixivSearchCLI:
     """交互界面"""
-    def __init__(self, db_path):
+    def __init__(self, db_path, page_size = 30):
         self.engine = PixivSearchEngine(db_path)
         self.completer = TagCompleter(db_path)
         self.session = PromptSession(completer=self.completer)
@@ -254,7 +278,7 @@ class PixivSearchCLI:
         # 分页相关变量
         self.current_results = []
         self.current_page = 1
-        self.page_size = 10  # 默认每页显示10条结果
+        self.page_size = page_size
         self.current_query = ""
     
     def display_result(self, results=None, page=None):
@@ -309,6 +333,58 @@ class PixivSearchCLI:
         
         return True
     
+    def display_popular_tags(self, limit=50):
+        """显示最流行的标签"""
+        import wcwidth
+        
+        results = self.engine.get_popular_tags(limit)
+        
+        if isinstance(results, str):  # 错误信息
+            print(results)
+            return
+            
+        if not results:
+            print("\n没有找到标签。")
+            return
+        
+        print("\n" + "="*60)
+        print(f"最流行的 {len(results)} 个标签")
+        print("="*60)
+        
+        # 计算每行标签部分(包括翻译)的最大显示宽度
+        max_combined_width = 0
+        for row in results:
+            jptag = row['jptag']
+            transtag = row['transtag'] or ""
+            
+            jp_width = wcwidth.wcswidth(jptag)
+            if transtag:
+                # "日文标签 (翻译标签)" 的总宽度
+                combined_width = jp_width + 2 + wcwidth.wcswidth(transtag) + 1  # +2为" ("，+1为")"
+            else:
+                combined_width = jp_width
+            
+            max_combined_width = max(max_combined_width, combined_width)
+        
+        for i, row in enumerate(results, 1):
+            jptag = row['jptag']
+            transtag = row['transtag'] or ""
+            count = row['count']
+            
+            # 构建要显示的标签部分
+            if transtag:
+                tag_display = f"{jptag} ({transtag})"
+            else:
+                tag_display = jptag
+            
+            # 计算填充
+            display_width = wcwidth.wcswidth(tag_display)
+            padding = ' ' * (max_combined_width - display_width + 2)  # +2为额外间距
+            
+            print(f"{i:3d}. {tag_display}{padding}- {count:,d}项")
+        
+        print("="*60)
+
     def handle_pagination(self):
         """处理分页模式"""
         while True:
@@ -380,6 +456,7 @@ class PixivSearchCLI:
         print("\n命令:")
         print("  :help  显示帮助")
         print("  :exit  退出程序")
+        print("  :top [数量]   显示最流行的标签")
         print("==============================\n")
     
     def run(self):
@@ -400,6 +477,19 @@ class PixivSearchCLI:
                     self.show_help()
                     continue
                 
+                if query.strip().startswith(":top"):
+                    parts = query.strip().split()
+                    limit = 50  # 默认显示50个标签
+                    
+                    if len(parts) > 1:
+                        try:
+                            limit = int(parts[1])
+                        except ValueError:
+                            print("无效的数量限制，使用默认值50")
+                    
+                    self.display_popular_tags(limit)
+                    continue
+
                 # 执行搜索
                 self.current_query = query
                 results = self.engine.search(query)
@@ -432,7 +522,7 @@ def main(db_path: str):
     cli.run()
 
 if __name__ == "__main__":
-    # main("src/illdata.db")
+    #main("src/illdata.db")
     
     # QueryParser测试
     print('-' * 50)

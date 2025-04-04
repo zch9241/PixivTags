@@ -1,3 +1,4 @@
+ipdb
 prompt-toolkit
 playwright
 psutil
