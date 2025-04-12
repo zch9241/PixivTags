@@ -29,11 +29,20 @@
 
 3. 编辑src文件夹下的`config.py`
 
-   **注意**：修改时请保留单引号！
-
    ```Python
    UID: str = ''    # 修改为你的UID
    CHROME_PATH: str = r''     # 修改为Google Chrome主程序位置
+   ```
+
+   **注意**：修改时请保留单引号！
+
+   **示例**：
+
+   ```Python
+   UID: str = '12345678'
+   CHROME_PATH: str = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+   ```
+
 4. 运行项目根目录下的`main.py`
 
 ## 拓展说明

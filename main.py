@@ -627,7 +627,90 @@ def commit_translated_tags(logger: logging.Logger, translated_tags: list):
     logger.info('翻译后的tag已提交')
 
 
+async def fetch_illusts_rating(session: playwright.async_api.APIRequestContext,
+                               pid: int,
+                               retries=5):
+    
+    url = f'https://www.pixiv.net/touch/ajax/illust/details?illust_id={str(pid)}'
+    for attempt in range(retries):
+        try:
+            response = await session.get(url)
+            
+            if response.status == 429:
+                wait_time = 2 ** (attempt + 1)
+                async_tqdm.write(f"触发限流 [{str(pid)}]，等待 {wait_time} 秒后重试...")
+                await asyncio.sleep(wait_time)
+                continue
+                
+            json_response = await response.json()
+            bookmark_user_total = json_response["body"]["illust_details"]["bookmark_user_total"]
+            return (pid, bookmark_user_total)
+            
+        except Exception as e:
+            async_tqdm.write(f"请求失败 [{str(pid)}]: {sys.exc_info()} \n{json_response}")
+            if attempt == retries - 1:  # 达到最大重试次数
+                return (pid, {"error": sys.exc_info()})
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+async def fetch_illusts_rating_worker(session: playwright.async_api.APIRequestContext, 
+                                      queue: asyncio.Queue, 
+                                      results: list, 
+                                      pbar: async_tqdm):
+    while True:
+        pid = await queue.get()
+        try:
+            pbar.set_description(f'pid: {str(pid)} ')
+            result: tuple[str, int] = await fetch_illusts_rating(session, pid)
+            results.append(result)
+            pbar.update(1)
+        except Exception as e:
+            handle_exception(logger, inspect.currentframe().f_code.co_name, in_bar=True, async_=True)
+        finally:
+            queue.task_done()
+
+async def fetch_illusts_rating_main(logger: logging.Logger, max_concurrency = 1):
+    
+    logger.info('正在运行')
+    
+    res = dbexecute('SELECT pid FROM illusts')
+    pids = [r[0] for r in res]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=CHROME_PATH
+        )
+        
+        context = await browser.new_context(storage_state=COOKIE_PATH)
+        session = context.request
+        
+        queue = asyncio.Queue()
+        for pid in pids:
+            await queue.put(pid)
+
+        results = []
+        
+        with async_tqdm(total=len(pids)) as pbar:
+            workers = [
+                asyncio.create_task(fetch_illusts_rating_worker(session, queue, results, pbar))
+                for _ in range(min(max_concurrency, len(pids)))
+            ]
+        
+            await queue.join()
+            
+            for w in workers:
+                w.cancel()
+        
+        await context.close()
+        await browser.close()
+    
+    return results
+        
+    
 def main():
+    '''
+    主程序入口
+    '''
     while True:
         print(mode_select)
         mode = input('模式 = ')
@@ -653,6 +736,7 @@ def main():
 
 
             trans, _ = asyncio.run(fetch_translated_tag_main(logger))
+            del _
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
@@ -727,6 +811,8 @@ if __name__ == "__main__":
 
 
     if (status:=config_check(logger)) is True:
-        main()
+        #main()
+        ret = asyncio.run(fetch_illusts_rating_main(logger))
+        ipdb.set_trace()
     else:
         logger.info('请前往 src/config.py 修改配置文件')
