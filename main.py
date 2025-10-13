@@ -124,15 +124,16 @@ def handle_exception(logger: logging.Logger, in_bar = True, _async = False):
     ex = "".join(tb_list)
     
     # 判断输出方式
-    if in_bar is True and _async is False:
-        tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
-        tqdm.write(f'ERROR {ex}')
-    elif in_bar is True and _async is True:
-        async_tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
-        async_tqdm.write(f'ERROR {ex}')
-    else:
-        logger.error(f'{exc_type.__name__}: {exc_value}')
-        logger.error(ex)
+    match [in_bar, _async]:
+        case [True, True]:
+            async_tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
+            async_tqdm.write(f'ERROR {ex}')
+        case [True, False]:
+            tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
+            tqdm.write(f'ERROR {ex}')
+        case [a, b] if a is False:
+            logger.error(f'{exc_type.__name__}: {exc_value}')
+            logger.error(ex)
 
 
 def dbexecute(query: str, 
@@ -159,7 +160,7 @@ def dbexecute(query: str,
         elif type(params) == tuple or params is None:
             cursor.execute(query, params or ()) 
         else:
-                raise Exception("传入的params类型校验错误")
+            raise Exception("传入的params类型校验错误")
         conn.commit()  
         res = cursor.fetchall()
     except Exception:
@@ -234,11 +235,12 @@ def get_cookies(logger: logging.Logger, rtime: int, forced = False):
         shutil.copy2(preferences_file, backup_file)
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch_persistent_context(headless=True,
+                browser = p.chromium.launch_persistent_context(headless=False, 
                     executable_path=CHROME_PATH,
-                    user_data_dir=user_data_dir
+                    user_data_dir=user_data_dir,
+                    channel='chrome'
                     )
-                
+
                 with open(r'.\src\cookies.json','w') as f:
                     state = {"cookies": browser.cookies('https://www.pixiv.net'), "origins": []}
                     f.write(json.dumps(state))
@@ -625,87 +627,7 @@ def commit_translated_tags(logger: logging.Logger, translated_tags: list):
         cursor.close()
     
     logger.info('翻译后的tag已提交')
-
-
-async def fetch_illusts_rating(session: playwright.async_api.APIRequestContext,
-                               pid: int,
-                               retries=5):
-    
-    url = f'https://www.pixiv.net/touch/ajax/illust/details?illust_id={str(pid)}'
-    for attempt in range(retries):
-        try:
-            response = await session.get(url)
-            
-            if response.status == 429:
-                wait_time = 2 ** (attempt + 1)
-                async_tqdm.write(f"触发限流 [{str(pid)}]，等待 {wait_time} 秒后重试...")
-                await asyncio.sleep(wait_time)
-                continue
-                
-            json_response = await response.json()
-            bookmark_user_total = json_response["body"]["illust_details"]["bookmark_user_total"]
-            return (pid, bookmark_user_total)
-            
-        except Exception as e:
-            async_tqdm.write(f"请求失败 [{str(pid)}]: {sys.exc_info()} \n{json_response}")
-            if attempt == retries - 1:  # 达到最大重试次数
-                return (pid, {"error": sys.exc_info()})
-            await asyncio.sleep(0.5 * (attempt + 1))
-
-async def fetch_illusts_rating_worker(session: playwright.async_api.APIRequestContext, 
-                                      queue: asyncio.Queue, 
-                                      results: list, 
-                                      pbar: async_tqdm):
-    while True:
-        pid = await queue.get()
-        try:
-            pbar.set_description(f'pid: {str(pid)} ')
-            result: tuple[str, int] = await fetch_illusts_rating(session, pid)
-            results.append(result)
-            pbar.update(1)
-        except Exception as e:
-            handle_exception(logger, inspect.currentframe().f_code.co_name, in_bar=True, async_=True)
-        finally:
-            queue.task_done()
-
-async def fetch_illusts_rating_main(logger: logging.Logger, max_concurrency = 1):
-    
-    logger.info('正在运行')
-    
-    res = dbexecute('SELECT pid FROM illusts')
-    pids = [r[0] for r in res]
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            executable_path=CHROME_PATH
-        )
-        
-        context = await browser.new_context(storage_state=COOKIE_PATH)
-        session = context.request
-        
-        queue = asyncio.Queue()
-        for pid in pids:
-            await queue.put(pid)
-
-        results = []
-        
-        with async_tqdm(total=len(pids)) as pbar:
-            workers = [
-                asyncio.create_task(fetch_illusts_rating_worker(session, queue, results, pbar))
-                for _ in range(min(max_concurrency, len(pids)))
-            ]
-        
-            await queue.join()
-            
-            for w in workers:
-                w.cancel()
-        
-        await context.close()
-        await browser.close()
-    
-    return results
-        
+  
     
 def main():
     '''
@@ -811,8 +733,8 @@ if __name__ == "__main__":
 
 
     if (status:=config_check(logger)) is True:
-        #main()
-        ret = asyncio.run(fetch_illusts_rating_main(logger))
-        ipdb.set_trace()
+        main()
+        #ret = asyncio.run(fetch_illusts_rating_main(logger))
+        #ipdb.set_trace()
     else:
         logger.info('请前往 src/config.py 修改配置文件')

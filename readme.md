@@ -16,7 +16,7 @@
 
    ```cmd
    pip install -r requirements.txt
-   playwright install
+   python -m playwright install
    ```
 
 2. 运行项目根目录下的`setup.bat`
