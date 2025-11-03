@@ -177,7 +177,7 @@ def load_cookies(logger: logging.Logger, path: str):
         logger (logging.Logger): 
         path (str): 导出的json格式cookie位置
     """
-    logger.info(f'从文件\n{path}\n读取cookie...')
+    logger.info(f'从文件读取cookie...\n    {path}')
     with open(path, 'r', encoding='utf-8') as f:
         cookies = json.load(f)
     
@@ -275,8 +275,8 @@ async def analyse_illusts_worker(session: playwright.async_api.APIRequestContext
                 try:
                     resp = await session.get(url)
                     if resp.status == 429:
-                        wait_time = 2 ** (attempt + 1)
-                        async_tqdm.write(f"触发限流 [{url}]，等待 {wait_time} 秒后重试...")
+                        wait_time = 60 * 2 ** attempt
+                        async_tqdm.write(f"[analyse_illusts_worker] 触发限流 [{url}]，等待 {wait_time} 秒后重试...")
                         await asyncio.sleep(wait_time)
                         continue
                     
@@ -390,17 +390,93 @@ def commit_illust_data(logger: logging.Logger, illdatas: list):
     logger.info('提交完成')
 
 
-async def fetch_tag(session: playwright.async_api.APIRequestContext, 
+class TagCrawlManager:
+    def __init__(self, browser:playwright.async_api.Browser, cookies, limit:int=100, wait:int=300):
+        """_summary_
+
+        Args:
+            browser (playwright.async_api.Browser): _description_
+            cookies (_type_): _description_
+            limit (int): 单次爬取的数量
+            wait (int): 达到limit后等待的时间(秒)
+        """
+        
+        self._browser = browser
+        self._cookies = cookies
+        self._limit = limit
+        self._wait = wait
+        self._counter = 0
+        self._active_requests = 0
+        self._lock = asyncio.Lock()
+        self._event = asyncio.Event()
+        self._event.set()
+        self._condition = asyncio.Condition(self._lock)
+        self.context: playwright.async_api.BrowserContext = None
+    
+    async def init_context(self):
+        self.context = await self._browser.new_context()
+        await self.context.add_cookies(self._cookies)
+    
+    async def _reset(self):
+        """重置状态
+        """
+        if self.context:
+            await self.context.close()
+            
+        await asyncio.sleep(self._wait)
+        
+        await self.init_context()
+        self._counter = 0
+        self._event.set()
+        
+        async_tqdm.write("[INFO] 重置完成，继续...")
+    
+    def get_context(self):
+        return self._RequestContextManager(self)
+    
+    class _RequestContextManager:
+        def __init__(self, manager):
+            self.manager: TagCrawlManager = manager
+            self.context: playwright.async_api.BrowserContext = None
+        
+        async def __aenter__(self):
+            while True:
+                await self.manager._event.wait()
+                
+                async with self.manager._lock:
+                    if self.manager._counter < self.manager._limit:     # 此时允许爬取
+                        self.manager._counter += 1
+                        self.manager._active_requests += 1
+                        self.context = self.manager.context
+                        
+                        return self.context
+                    else:   # 此时达到限制
+                        if self.manager._event.is_set():    # 第一个达到限制的协程
+                            async_tqdm.write(f"[INFO] 请求数达到限制({self.manager._limit})，准备重置...")
+                            
+                            self.manager._event.clear()     # 阻塞后续的新请求
+                            await self.manager._condition.wait_for(lambda: self.manager._active_requests == 0)      # 等待所有正在请求的协程完成（引用计数为零）
+                            await self.manager._reset()     # 重置（包含关闭context操作）
+                        else:   # 后续达到限制的协程
+                            pass
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            async with self.manager._lock:
+                self.manager._active_requests -= 1
+                self.manager._condition.notify()
+
+
+async def fetch_tag(context: playwright.async_api.BrowserContext, 
                     tag: str, 
                     retries=5) -> tuple[str, dict]:
     encoded_tag = parse.quote(tag, safe = '')
     url = f"https://www.pixiv.net/ajax/search/tags/{encoded_tag}?lang=zh"
     for attempt in range(retries):
         try:
-            response = await session.get(url)
+            response = await context.request.get(url)
             
             if response.status == 429:
-                wait_time = 2 ** (attempt + 1)
+                wait_time = 60 * 2 ** attempt
                 async_tqdm.write(f"[fetch_tag] (WARNING) 触发限流 [{tag}]，等待 {wait_time} 秒后重试...")
                 await asyncio.sleep(wait_time)
                 continue
@@ -413,7 +489,7 @@ async def fetch_tag(session: playwright.async_api.APIRequestContext,
                 return (tag, {"error": sys.exc_info()})
             await asyncio.sleep(0.5 * (attempt + 1))
 
-async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, 
+async def fetch_tag_worker(manager: TagCrawlManager, 
                            queue: asyncio.Queue, 
                            results: list, 
                            pbar: async_tqdm):
@@ -427,8 +503,11 @@ async def fetch_tag_worker(session: playwright.async_api.APIRequestContext,
                 case _:
                     raise Exception(f'变量jptag为不支持的类型 {type(jptag)}')
             pbar.set_description(desc)
-            result: tuple[str, dict] = await fetch_tag(session, jptag)
-            results.append(result)
+            
+            async with manager.get_context() as context:
+                if context:
+                    result: tuple[str, dict] = await fetch_tag(context, jptag)
+                    results.append(result)
             pbar.update(1)
         except Exception as e:
             handle_exception(logger, inspect.currentframe().f_code.co_name, in_bar=True, async_=True)
@@ -439,14 +518,14 @@ async def fetch_translated_tag_main(logger: logging.Logger,
                                     cookies, 
                                     priority: list = ['zh', 'en', 'zh_tw'], 
                                     jptags: list = [],
-                                    max_concurrency = 3) -> tuple[list, list]:
+                                    max_concurrency = 20) -> tuple[list, list]:
     """获取pixiv上的tag翻译
 
     Args:
         logger (logging.Logger): no description
         priority (list, optional): 翻译语言优先级列表（优先级递减）. Defaults to ['zh', 'en', 'zh_tw'].
         jptags (list, optional): 要翻译的tag列表.
-        max_concurrency (int, optional): 最大协程数量. Defaults to 3.
+        max_concurrency (int, optional): 最大协程数量. Defaults to 20.
 
     Returns:
         tuple[list, list]: 包含一个jptag-transtag的字典的列表，以及一个未翻译成功的tag的列表
@@ -473,9 +552,8 @@ async def fetch_translated_tag_main(logger: logging.Logger,
             channel='chrome'
         )
         
-        context = await browser.new_context()
-        await context.add_cookies(cookies)
-        session = context.request
+        manager = TagCrawlManager(browser, cookies)
+        await manager.init_context()
         
         queue = asyncio.Queue()
         for jptag in jptags:
@@ -485,7 +563,7 @@ async def fetch_translated_tag_main(logger: logging.Logger,
         
         with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
             workers = [
-                asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
+                asyncio.create_task(fetch_tag_worker(manager, queue, results, pbar))
                 for _ in range(min(max_concurrency, len(jptags)))
             ]
 
@@ -494,7 +572,6 @@ async def fetch_translated_tag_main(logger: logging.Logger,
             for w in workers:
                 w.cancel()
         
-        await context.close()
         await browser.close()
     
     translation_results = []
