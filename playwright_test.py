@@ -2,29 +2,27 @@ from playwright.sync_api import sync_playwright
 import os
 import json
 
-def decrypt():
-    with sync_playwright() as p:
-        # 使用chrome的用户数据时需要关闭已运行的浏览器实例
-        browser = p.chromium.launch_persistent_context(headless=True,
-            executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-            user_data_dir=os.path.expanduser(
-                os.path.join(os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data'))
-            )
-        with open(r'.\src\cookies.json','w') as f:
-            f.write(json.dumps(browser.cookies('https://www.pixiv.net')))
-        browser.storage_state(path = 'cookie.json')
-        # 关闭浏览器
-        browser.close()
+def load_cookies():
+    with open(r"C:\Users\chaos_z\Downloads\www.pixiv.net_json_1762072076938.json", "r", encoding="utf-8") as f:
+        cookies = json.load(f)
+    
+    for cookie in cookies:
+        if "sameSite" in cookie:
+            if cookie["sameSite"].lower() == "unspecified":
+                cookie["sameSite"] = 'Lax'
+            elif cookie["sameSite"].lower() == "no_restriction":
+                cookie["sameSite"] = 'None'
+    return cookies
 
-def test():
+def auth_test(cookies):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe')
-        page = browser.new_page()
-        page.goto('https://www.baidu.com')
-        print(page.title())
-        page.goto('https://www.google.com')
-        print(page.title())
-        browser.close()
+        browser = p.chromium.launch(headless=False, channel='chrome')
+        context = browser.new_context()
+        context.add_cookies(cookies)
+        
+        page = context.new_page()
+        page.goto("https://www.pixiv.net")
+        
+        os.system("pause")
 
-if __name__ == "__main__":
-    decrypt()
+auth_test(load_cookies())

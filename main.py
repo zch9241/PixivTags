@@ -12,28 +12,27 @@
 
 # TODO:
 # 为插画添加更多元数据
+# 修复context
 
 
 
-# standard-libs
+# standard libraries
 import asyncio
 import inspect
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import time
 import traceback
 from urllib import parse
 
-# site-packages
+# 3rd party modules
 import ipdb
 from playwright.async_api import async_playwright
 import playwright.async_api
-from playwright.sync_api import sync_playwright
-import psutil
+from playwright.sync_api import sync_playwright, expect
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as async_tqdm
 from wcwidth import wcswidth
@@ -46,13 +45,10 @@ from src import config
 
 # 常量初始化
 UID = config.UID
-CHROME_PATH = config.CHROME_PATH
-COOKIE_EXPIRED_TIME = config.COOKIE_EXPIRED_TIME
 
 CWD = os.getcwd()
 SQLPATH = CWD + r'\src\illdata.db'
 COOKIE_PATH = CWD + r'\src\cookies.json'
-COOKIE_TIME_PATH = CWD + r'\src\cookies_modify_time'
 TAG_LOG_PATH = CWD + r'\logs\err_tags.log'
 
 # 交互模式
@@ -99,12 +95,10 @@ def config_check(logger: logging.Logger) -> bool:
     配置文件检查, 返回False为出现错误
     """
     logger.info('检查配置文件')
-    if not all([type(UID) is str, 
-            type(CHROME_PATH) is str, 
-            type(COOKIE_EXPIRED_TIME) is int]):
+    if not (type(UID) is str):
         logger.error('config.py数据类型校验失败')
         return False
-    if any([UID == '', CHROME_PATH == '', COOKIE_EXPIRED_TIME == 0]):
+    if UID == '':
         logger.error('config.py中有变量值未填写')
         return False
     return True      
@@ -124,15 +118,16 @@ def handle_exception(logger: logging.Logger, in_bar = True, _async = False):
     ex = "".join(tb_list)
     
     # 判断输出方式
-    if in_bar is True and _async is False:
-        tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
-        tqdm.write(f'ERROR {ex}')
-    elif in_bar is True and _async is True:
-        async_tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
-        async_tqdm.write(f'ERROR {ex}')
-    else:
-        logger.error(f'{exc_type.__name__}: {exc_value}')
-        logger.error(ex)
+    match [in_bar, _async]:
+        case [True, True]:
+            async_tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
+            async_tqdm.write(f'ERROR {ex}')
+        case [True, False]:
+            tqdm.write(f'ERROR {exc_type.__name__}: {exc_value}')
+            tqdm.write(f'ERROR {ex}')
+        case [a, b] if a is False:
+            logger.error(f'{exc_type.__name__}: {exc_value}')
+            logger.error(ex)
 
 
 def dbexecute(query: str, 
@@ -159,7 +154,7 @@ def dbexecute(query: str,
         elif type(params) == tuple or params is None:
             cursor.execute(query, params or ()) 
         else:
-                raise Exception("传入的params类型校验错误")
+            raise Exception("传入的params类型校验错误")
         conn.commit()  
         res = cursor.fetchall()
     except Exception:
@@ -175,89 +170,28 @@ def dbexecute(query: str,
 
 
 # 获取cookies
-def get_cookies(logger: logging.Logger, rtime: int, forced = False):
-    """获取Google Chrome的cookies
+def load_cookies(logger: logging.Logger, path: str):
+    """从文件读取cookie
 
     Args:
-        rtime (int): cookie更新间隔
-        forced (bool): 是否强制更新
+        logger (logging.Logger): 
+        path (str): 导出的json格式cookie位置
     """
-    # 判断是否需要更新cookies
-    logger.info('验证cookie有效性')
+    logger.info(f'从文件读取cookie...\n    {path}')
+    with open(path, 'r', encoding='utf-8') as f:
+        cookies = json.load(f)
     
-    with open(COOKIE_TIME_PATH, 'r') as f:
-        data = f.read()
-        if data != '':
-            modify_time = float(data)
-        else:
-            modify_time = 0
-    relative_time = time.time() - modify_time
+    for cookie in cookies:
+        if "sameSite" in cookie:
+            if cookie["sameSite"].lower() == "unspecified":
+                cookie["sameSite"] = 'Lax'
+            elif cookie["sameSite"].lower() == "no_restriction":
+                cookie["sameSite"] = 'None'
     
-    if (relative_time < rtime and 
-        relative_time > 0 and 
-        forced is False):
-        
-        logger.info(f'无需更新cookies: 距上次更新 {relative_time} 秒')
-    
-    else:
-        if forced is False:
-            logger.info(f'需要更新cookies: 距上次更新 {relative_time} 秒')
-        elif forced is True:
-            logger.info('forced=True, 强制更新cookies')
-
-        # 判断Google Chrome是否在运行，如果在chrome运行时使用playwright将会报错
-        def find_process(name):
-            for proc in psutil.process_iter(['pid', 'name']):
-                try:
-                    if name.lower() in proc.info['name'].lower():
-                        return proc
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
-            return None
-
-        def kill_process(name):
-            proc = find_process(name)
-            while proc:
-                logger.info(f"找到 chrome 进程 (name: {proc.info['name']}, PID: {proc.info['pid']})")
-                logger.info("请结束进程，否则cookies无法正常获取")
-                
-                os.system('pause')
-                proc = find_process(name)
-        kill_process("chrome.exe")
-
-        # 获取cookies
-        user_data_dir=os.path.expanduser(
-            os.path.join(os.environ['LOCALAPPDATA'], r'Google\Chrome\User Data'))
-        ## 备份 Preferences 文件
-        preferences_file = os.path.join(user_data_dir, 'Default', 'Preferences')
-        backup_file = preferences_file + '.backup'
-        shutil.copy2(preferences_file, backup_file)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch_persistent_context(headless=True,
-                    executable_path=CHROME_PATH,
-                    user_data_dir=user_data_dir
-                    )
-                
-                with open(r'.\src\cookies.json','w') as f:
-                    state = {"cookies": browser.cookies('https://www.pixiv.net'), "origins": []}
-                    f.write(json.dumps(state))
-                # 关闭浏览器
-                browser.close()
-        finally:
-            # 恢复 Preferences 文件
-            shutil.copy2(backup_file, preferences_file)
-            os.remove(backup_file)
-
-        logger.info('cookies已获取')
-        
-        # 更新获取cookie的时间
-        with open(COOKIE_TIME_PATH, "w") as f:
-            f.write(str(time.time()))
-
+    return cookies
 
 # 获取pixiv上的tags并翻译
-def analyse_bookmarks(logger: logging.Logger, rest_flag=2, limit=100) -> list:
+def analyse_bookmarks(logger: logging.Logger, cookies, rest_flag=2, limit=100) -> list:
     """解析用户bookmarks接口URL
 
     接口名称: https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag={}&offset={}&limit={}&rest={}&lang={}
@@ -280,8 +214,9 @@ def analyse_bookmarks(logger: logging.Logger, rest_flag=2, limit=100) -> list:
     url_hide = f'https://www.pixiv.net/ajax/user/{UID}/illusts/bookmarks?tag=&offset=0&limit=1&rest=hide&lang=zh'
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True,executable_path=CHROME_PATH)
-        context = browser.new_context(storage_state=COOKIE_PATH)
+        browser = p.chromium.launch(headless=True,channel='chrome')
+        context = browser.new_context()
+        context.add_cookies(cookies)
         session = context.request
         
         resp = session.get(url_show).json()
@@ -340,8 +275,8 @@ async def analyse_illusts_worker(session: playwright.async_api.APIRequestContext
                 try:
                     resp = await session.get(url)
                     if resp.status == 429:
-                        wait_time = 2 ** (attempt + 1)
-                        async_tqdm.write(f"触发限流 [{url}]，等待 {wait_time} 秒后重试...")
+                        wait_time = 60 * 2 ** attempt
+                        async_tqdm.write(f"[analyse_illusts_worker] 触发限流 [{url}]，等待 {wait_time} 秒后重试...")
                         await asyncio.sleep(wait_time)
                         continue
                     
@@ -363,7 +298,7 @@ async def analyse_illusts_worker(session: playwright.async_api.APIRequestContext
         finally:
             queue.task_done()
     
-async def analyse_illusts_main(logger: logging.Logger, bookmark_urls: list, max_concurrency = 3):
+async def analyse_illusts_main(logger: logging.Logger, bookmark_urls: list, cookies, max_concurrency = 3):
     """获取bookmark中每张插画的数据
 
     Args:
@@ -381,10 +316,11 @@ async def analyse_illusts_main(logger: logging.Logger, bookmark_urls: list, max_
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            executable_path=CHROME_PATH
+            channel='chrome'
         )
         
-        context = await browser.new_context(storage_state=COOKIE_PATH)
+        context = await browser.new_context()
+        await context.add_cookies(cookies)
         session = context.request
         
         queue = asyncio.Queue()
@@ -454,18 +390,94 @@ def commit_illust_data(logger: logging.Logger, illdatas: list):
     logger.info('提交完成')
 
 
-async def fetch_tag(session: playwright.async_api.APIRequestContext, 
+class TagCrawlManager:
+    def __init__(self, browser:playwright.async_api.Browser, cookies, limit:int=100, wait:int=300):
+        """_summary_
+
+        Args:
+            browser (playwright.async_api.Browser): _description_
+            cookies (_type_): _description_
+            limit (int): 单次爬取的数量
+            wait (int): 达到limit后等待的时间(秒)
+        """
+        
+        self._browser = browser
+        self._cookies = cookies
+        self._limit = limit
+        self._wait = wait
+        self._counter = 0
+        self._active_requests = 0
+        self._lock = asyncio.Lock()
+        self._event = asyncio.Event()
+        self._event.set()
+        self._condition = asyncio.Condition(self._lock)
+        self.context: playwright.async_api.BrowserContext = None
+    
+    async def init_context(self):
+        self.context = await self._browser.new_context()
+        await self.context.add_cookies(self._cookies)
+    
+    async def _reset(self):
+        """重置状态
+        """
+        if self.context:
+            await self.context.close()
+            
+        await asyncio.sleep(self._wait)
+        
+        await self.init_context()
+        self._counter = 0
+        self._event.set()
+        
+        async_tqdm.write("[INFO] 重置完成，继续...")
+    
+    def get_context(self):
+        return self._RequestContextManager(self)
+    
+    class _RequestContextManager:
+        def __init__(self, manager):
+            self.manager: TagCrawlManager = manager
+            self.context: playwright.async_api.BrowserContext = None
+        
+        async def __aenter__(self):
+            while True:
+                await self.manager._event.wait()
+                
+                async with self.manager._lock:
+                    if self.manager._counter < self.manager._limit:     # 此时允许爬取
+                        self.manager._counter += 1
+                        self.manager._active_requests += 1
+                        self.context = self.manager.context
+                        
+                        return self.context
+                    else:   # 此时达到限制
+                        if self.manager._event.is_set():    # 第一个达到限制的协程
+                            async_tqdm.write(f"[INFO] 请求数达到限制({self.manager._limit})，准备重置...")
+                            
+                            self.manager._event.clear()     # 阻塞后续的新请求
+                            await self.manager._condition.wait_for(lambda: self.manager._active_requests == 0)      # 等待所有正在请求的协程完成（引用计数为零）
+                            await self.manager._reset()     # 重置（包含关闭context操作）
+                        else:   # 后续达到限制的协程
+                            pass
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            async with self.manager._lock:
+                self.manager._active_requests -= 1
+                self.manager._condition.notify()
+
+
+async def fetch_tag(context: playwright.async_api.BrowserContext, 
                     tag: str, 
                     retries=5) -> tuple[str, dict]:
     encoded_tag = parse.quote(tag, safe = '')
     url = f"https://www.pixiv.net/ajax/search/tags/{encoded_tag}?lang=zh"
     for attempt in range(retries):
         try:
-            response = await session.get(url)
+            response = await context.request.get(url)
             
             if response.status == 429:
-                wait_time = 2 ** (attempt + 1)
-                async_tqdm.write(f"触发限流 [{tag}]，等待 {wait_time} 秒后重试...")
+                wait_time = 60 * 2 ** attempt
+                async_tqdm.write(f"[fetch_tag] (WARNING) 触发限流 [{tag}]，等待 {wait_time} 秒后重试...")
                 await asyncio.sleep(wait_time)
                 continue
                 
@@ -477,7 +489,7 @@ async def fetch_tag(session: playwright.async_api.APIRequestContext,
                 return (tag, {"error": sys.exc_info()})
             await asyncio.sleep(0.5 * (attempt + 1))
 
-async def fetch_tag_worker(session: playwright.async_api.APIRequestContext, 
+async def fetch_tag_worker(manager: TagCrawlManager, 
                            queue: asyncio.Queue, 
                            results: list, 
                            pbar: async_tqdm):
@@ -491,8 +503,11 @@ async def fetch_tag_worker(session: playwright.async_api.APIRequestContext,
                 case _:
                     raise Exception(f'变量jptag为不支持的类型 {type(jptag)}')
             pbar.set_description(desc)
-            result: tuple[str, dict] = await fetch_tag(session, jptag)
-            results.append(result)
+            
+            async with manager.get_context() as context:
+                if context:
+                    result: tuple[str, dict] = await fetch_tag(context, jptag)
+                    results.append(result)
             pbar.update(1)
         except Exception as e:
             handle_exception(logger, inspect.currentframe().f_code.co_name, in_bar=True, async_=True)
@@ -500,6 +515,7 @@ async def fetch_tag_worker(session: playwright.async_api.APIRequestContext,
             queue.task_done()
 
 async def fetch_translated_tag_main(logger: logging.Logger, 
+                                    cookies, 
                                     priority: list = ['zh', 'en', 'zh_tw'], 
                                     jptags: list = [],
                                     max_concurrency = 20) -> tuple[list, list]:
@@ -508,7 +524,7 @@ async def fetch_translated_tag_main(logger: logging.Logger,
     Args:
         logger (logging.Logger): no description
         priority (list, optional): 翻译语言优先级列表（优先级递减）. Defaults to ['zh', 'en', 'zh_tw'].
-        jptags (list, optional): 要翻译的tag列表. Defaults to [].
+        jptags (list, optional): 要翻译的tag列表.
         max_concurrency (int, optional): 最大协程数量. Defaults to 20.
 
     Returns:
@@ -533,11 +549,11 @@ async def fetch_translated_tag_main(logger: logging.Logger,
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            executable_path=CHROME_PATH
+            channel='chrome'
         )
         
-        context = await browser.new_context(storage_state=COOKIE_PATH)
-        session = context.request
+        manager = TagCrawlManager(browser, cookies)
+        await manager.init_context()
         
         queue = asyncio.Queue()
         for jptag in jptags:
@@ -547,7 +563,7 @@ async def fetch_translated_tag_main(logger: logging.Logger,
         
         with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
             workers = [
-                asyncio.create_task(fetch_tag_worker(session, queue, results, pbar))
+                asyncio.create_task(fetch_tag_worker(manager, queue, results, pbar))
                 for _ in range(min(max_concurrency, len(jptags)))
             ]
 
@@ -556,7 +572,6 @@ async def fetch_translated_tag_main(logger: logging.Logger,
             for w in workers:
                 w.cancel()
         
-        await context.close()
         await browser.close()
     
     translation_results = []
@@ -625,22 +640,25 @@ def commit_translated_tags(logger: logging.Logger, translated_tags: list):
         cursor.close()
     
     logger.info('翻译后的tag已提交')
-
-
+  
+    
 def main():
+    '''
+    主程序入口
+    '''
     while True:
         print(mode_select)
         mode = input('模式 = ')
         if mode == '1':
             start = time.time()
-            get_cookies(logger, rtime=COOKIE_EXPIRED_TIME)
-            URLs = analyse_bookmarks(logger)
+            cookies = load_cookies(logger, COOKIE_PATH)
+            URLs = analyse_bookmarks(logger, cookies)
             
             # debug:
             # URLs = ['https://www.pixiv.net/ajax/user/71963925/illusts/bookmarks?tag=&offset=187&limit=1&rest=hide']
 
             
-            illdatas = asyncio.run(analyse_illusts_main(logger, URLs))
+            illdatas = asyncio.run(analyse_illusts_main(logger, URLs, cookies))
 
             # debug:
             #illdata = [{'id': '79862254', 'title': 'タシュケント♡', 'illustType': 0, 'xRestrict': 0, 'restrict': 0, 'sl': 2, 'url': 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2020/03/03/09/31/57/79862254_p0_square1200.jpg', 'description': '', 'tags': ['タシュケント', 'アズールレーン', 'タシュケント(アズールレーン)', 'イラスト', '鯛焼き', 'アズールレーン10000users入り'], 'userId': '9216952', 'userName': 'AppleCaramel', 'width': 1800, 'height': 2546, 'pageCount': 1, 'isBookmarkable': True, 'bookmarkData': {'id': '25192310391', 'private': False}, 'alt': '#タシュケント タシュケント♡ - AppleCaramel的插画', 'titleCaptionTranslation': {'workTitle': None, 'workCaption': None}, 'createDate': '2020-03-03T09:31:57+09:00', 'updateDate': '2020-03-03T09:31:57+09:00', 'isUnlisted': False, 'isMasked': False, 'aiType': 0, 'profileImageUrl': 'https://i.pximg.net/user-profile/img/2022/10/24/02/12/49/23505973_7d9aa88560c5115b85cc29749ed40e28_50.jpg'},
@@ -652,7 +670,8 @@ def main():
             commit_illust_data(logger, illdatas)
 
 
-            trans, _ = asyncio.run(fetch_translated_tag_main(logger))
+            trans, _ = asyncio.run(fetch_translated_tag_main(logger, cookies))
+            del _
             # debug:
             # trans = [{'オリジナル': '原创'}, {'拾ってください': 'None'}, {'鯛焼き': 'None'}, {'かのかり': 'Rent-A-Girlfriend'}, {'彼女、お借りします5000users入り': '租借女友5000收藏'}, {'女の子': '女孩子'}, {'桜沢墨': '樱泽墨'}, {'緑髪': 'green hair'}, {'猫耳': 'cat ears'}, {'猫': 'cat'}, {'天使': 'angel'}, {'白ニーソ': '白色过膝袜'}, {'制服': 'uniform'}, {'彼女、お借りします': 'Rent-A-Girlfriend'}, {'アズールレーン': '碧蓝航线'}, {'ぱんつ': '胖次'}, {'オリジナル1000users入り': '原创1000users加入书籤'}, {'タシュケント': '塔什干'}, {'ハグ': '拥抱'}, {'タシュケント(アズールレーン)': '塔什干（碧蓝航线）'}, {'アズールレーン10000users入り': '碧蓝航线10000收藏'}, {'巨乳': 'large breasts'}, {'イラスト': '插画'}]
 
@@ -726,7 +745,8 @@ if __name__ == "__main__":
         cursor.close()
 
 
-    if (status:=config_check(logger)) is True:
+    if config_check(logger) is True:
         main()
+        #ipdb.set_trace()
     else:
         logger.info('请前往 src/config.py 修改配置文件')
