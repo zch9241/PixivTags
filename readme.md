@@ -63,7 +63,28 @@
 
       - 参数 `page_size`: 分页模式的默认分页数量
 
-2. 当程序提示触发限流时，可以尝试切换IP
+2. 可以选择动态切换IP来规避限流（本程序仅实现了基于clash verge API切换IP的功能）
+
+```Python
+# src/config.py
+ENABLE_CLASH_PROXY = False                            # 修改为True
+CLASH_HTTP_PROXY: str = ''                            # 修改为clash verge的http代理
+CLASH_API_HOST: str = ''                              # 修改为clash verge的外部控制器监听地址
+CLASH_API_SECRET: str = ''                            # 修改为clash verge的外部控制器API访问密钥（若有）
+CLASH_SELECTOR_NAME: str = ''                         # 修改为clash verge代理组选择器名称
+CLASH_NODES_FILTER: list = []                         # 修改为想要使用的节点部分名称（可选）（根据节点名称选择对应地区的节点）
+```
+
+示例：
+
+```Python
+ENABLE_CLASH_PROXY = True
+CLASH_HTTP_PROXY: str = 'http://127.0.0.1:7897'
+CLASH_API_HOST: str = 'http://127.0.0.1:9097'
+CLASH_API_SECRET: str = '123456'
+CLASH_SELECTOR_NAME: str = 'xyz Cloud'
+CLASH_NODES_FILTER: list = ['香港', '日本', '美国']
+```
 
 ## 版权声明
 

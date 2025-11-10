@@ -12,7 +12,6 @@
 
 # TODO:
 # 为插画添加更多元数据
-# 修复context
 
 
 
@@ -29,6 +28,7 @@ import traceback
 from urllib import parse
 
 # 3rd party modules
+import aiohttp
 import ipdb
 from playwright.async_api import async_playwright
 import playwright.async_api
@@ -41,6 +41,7 @@ from win10toast import ToastNotifier
 
 import search
 from src import config
+import switch_clash_proxy
 
 
 # 常量初始化
@@ -391,7 +392,7 @@ def commit_illust_data(logger: logging.Logger, illdatas: list):
 
 
 class TagCrawlManager:
-    def __init__(self, browser:playwright.async_api.Browser, cookies, limit:int=100, wait:int=300):
+    def __init__(self, browser:playwright.async_api.Browser, cookies, limit, wait):
         """_summary_
 
         Args:
@@ -403,18 +404,54 @@ class TagCrawlManager:
         
         self._browser = browser
         self._cookies = cookies
+        self.context: playwright.async_api.BrowserContext = None
+        
         self._limit = limit
         self._wait = wait
         self._counter = 0
         self._active_requests = 0
+        
         self._lock = asyncio.Lock()
         self._event = asyncio.Event()
         self._event.set()
         self._condition = asyncio.Condition(self._lock)
-        self.context: playwright.async_api.BrowserContext = None
+        
+        self._enable_clash_proxy = config.ENABLE_CLASH_PROXY
+        if self._enable_clash_proxy:
+            self._proxy_config = {"server": config.CLASH_HTTP_PROXY}
+            self._selector_name = config.CLASH_SELECTOR_NAME
+            self._node_filter = config.CLASH_NODES_FILTER
+            self._available_nodes = []
+            self._nodes_num = 0
+            self._current_node_index = 0
+            self._aiohttp_session: aiohttp.ClientSession = None
     
-    async def init_context(self):
-        self.context = await self._browser.new_context()
+    async def init(self):
+        """初始化playwright context和aiohttp session(若启用clash)
+        """
+        if self._enable_clash_proxy:
+            self._aiohttp_session = aiohttp.ClientSession()
+            self._available_nodes = await switch_clash_proxy.get_clash_nodes(self._aiohttp_session, self._selector_name, self._node_filter)
+            
+            if not self._available_nodes:
+                raise RuntimeError("未能从clash API获取节点")
+            self._nodes_num = len(self._available_nodes)
+            
+            if self._current_node_index >= self._nodes_num:
+                self._current_node_index = 0
+            
+            status = await switch_clash_proxy.switch_clash_proxy(self._aiohttp_session, 
+                                                                 self._selector_name, 
+                                                                 self._available_nodes[self._current_node_index])
+            if not status:
+                raise RuntimeError("未能切换节点")
+            self.context = await self._browser.new_context(proxy=self._proxy_config)
+            self._current_node_index += 1
+            
+            await self._aiohttp_session.close()
+            
+        else:
+            self.context = await self._browser.new_context()
         await self.context.add_cookies(self._cookies)
     
     async def _reset(self):
@@ -422,14 +459,19 @@ class TagCrawlManager:
         """
         if self.context:
             await self.context.close()
-            
-        await asyncio.sleep(self._wait)
         
-        await self.init_context()
+        if self._wait > 0:
+            wait_pbar = async_tqdm(range(self._wait),
+                                desc=f"等待({self._wait}s): ",
+                                position=0,
+                                leave=False)
+            
+            for _ in wait_pbar:
+                await asyncio.sleep(1)
+        
+        await self.init()
         self._counter = 0
         self._event.set()
-        
-        async_tqdm.write("[INFO] 重置完成，继续...")
     
     def get_context(self):
         return self._RequestContextManager(self)
@@ -452,7 +494,7 @@ class TagCrawlManager:
                         return self.context
                     else:   # 此时达到限制
                         if self.manager._event.is_set():    # 第一个达到限制的协程
-                            async_tqdm.write(f"[INFO] 请求数达到限制({self.manager._limit})，准备重置...")
+                            async_tqdm.write(f"[TagCrawlManager] (INFO) 请求数达到限制({self.manager._limit})，准备重置...")
                             
                             self.manager._event.clear()     # 阻塞后续的新请求
                             await self.manager._condition.wait_for(lambda: self.manager._active_requests == 0)      # 等待所有正在请求的协程完成（引用计数为零）
@@ -518,6 +560,8 @@ async def fetch_translated_tag_main(logger: logging.Logger,
                                     cookies, 
                                     priority: list = ['zh', 'en', 'zh_tw'], 
                                     jptags: list = [],
+                                    limit = 100,
+                                    wait = 5,
                                     max_concurrency = 20) -> tuple[list, list]:
     """获取pixiv上的tag翻译
 
@@ -525,6 +569,8 @@ async def fetch_translated_tag_main(logger: logging.Logger,
         logger (logging.Logger): no description
         priority (list, optional): 翻译语言优先级列表（优先级递减）. Defaults to ['zh', 'en', 'zh_tw'].
         jptags (list, optional): 要翻译的tag列表.
+        limit (int, optional): 每周期请求次数.
+        wait (int, optional): 每周期请求完成后等待的时间(s).
         max_concurrency (int, optional): 最大协程数量. Defaults to 20.
 
     Returns:
@@ -552,8 +598,8 @@ async def fetch_translated_tag_main(logger: logging.Logger,
             channel='chrome'
         )
         
-        manager = TagCrawlManager(browser, cookies)
-        await manager.init_context()
+        manager = TagCrawlManager(browser, cookies, limit, wait)
+        await manager.init()
         
         queue = asyncio.Queue()
         for jptag in jptags:
@@ -561,7 +607,7 @@ async def fetch_translated_tag_main(logger: logging.Logger,
         
         results = []
         
-        with async_tqdm(total=len(jptags), desc="采集进度") as pbar:
+        with async_tqdm(total=len(jptags), desc="采集进度", position=1) as pbar:
             workers = [
                 asyncio.create_task(fetch_tag_worker(manager, queue, results, pbar))
                 for _ in range(min(max_concurrency, len(jptags)))
